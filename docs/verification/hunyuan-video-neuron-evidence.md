@@ -15,8 +15,7 @@ TP2xCP2 and the first 720p attempt ran at `4c38a58` (no code change since `d6ffb
 three 720p attempts ran at `f4d9ac1`, `15b503f` and `ce9d212`, and the trace-cache runs at
 `f4d9ac1`, `ce9d212` and `195fc8c`, each of which changes code (the fixes in the bug ledger). See
 "End to end" and "CLI runs" below; the timings are reported in that benchmark doc. A compiler-level
-deep dive into
-the one open parity result ran on 2026-10-25 14:28-15:25 UTC at `eef92d6`, with no code change
+deep dive into the one open parity result ran on 2026-10-25 14:28-15:25 UTC at `eef92d6`, with no code change
 (section "Compiler-level cause of the full-depth t=900 result"; its files are under `J/s3/`).
 
 Logs, result JSONs, oracles and diagnosis dumps are kept outside the repo, as the job rules
@@ -51,7 +50,7 @@ missed the gate) · **NOT MEASURED** (not run in this stage).
   per block instead of diffusers' two. A graph break anywhere between the two updates gives
   1.000-1.002x, a break before the first update does not (1.186-1.188x); a host CPU emulation of
   the single rounding reproduces the device's pattern and its t=900 excess (1.198x at t=900,
-    device 1.190x; close at 5 of 7 timesteps, not at t=850 or t=300); rounding `h1` explicitly
+  device 1.190x; close at 5 of 7 timesteps, not at t=850 or t=300); rounding `h1` explicitly
   inside the compiled graph gives 0.966-1.085x on all 8 samples.
   This rounding is **not less accurate**: over the 7 timesteps the compiled DiT's mean rel-L1 is
   0.973x the control's, against 1.027x for eager. The t=900 sample fails because the paths that
