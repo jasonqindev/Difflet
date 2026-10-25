@@ -10,7 +10,9 @@ compiled mask-bounds regression (sections Summary to Bug ledger). Stage 3, the e
 check, ran right after it (2026-10-24 22:41-23:02 UTC, code unchanged: `b38f3bc` only added this
 doc). The CLI runs (stage 4) ran on 2026-10-25 at `d6ffb9a` (TP4) and `4c38a58` (TP2, TP2xCP2,
 720p); neither commit after `d6ffb9a` touched code. See "End to end" and "CLI runs" below; the
-timings are reported in `benchmark/trn2/hunyuan_video_neuron.md`.
+timings are reported in `benchmark/trn2/hunyuan_video_neuron.md`. A compiler-level deep dive into
+the one open parity result ran on 2026-10-25 14:28-15:25 UTC at `eef92d6`, with no code change
+(section "Compiler-level cause of the full-depth t=900 result"; its files are under `J/s3/`).
 
 Logs, result JSONs, oracles and diagnosis dumps are kept outside the repo, as the job rules
 require, under `J = /home/ubuntu/.claude/jobs/28e8164e/tmp/hv1_device/`; the CLI runs' evidence is
@@ -38,6 +40,20 @@ missed the gate) · **NOT MEASURED** (not run in this stage).
   Only t=900/20 fails. Eager mode on the same 7 timesteps at 20 valid tokens gives 0.989-1.125x.
   The excess is confined to compiling the dual-stream block as a whole graph, and to the 12
   massive-activation channels of the residual stream. The diagnosis is below.
+* **Cause found (deep dive): neuronx-cc's default mixed-precision accumulation.** When the dual
+  block's two gated residual updates are in one graph, the compiler does not round the
+  intermediate stream `h1 = h + attn*gate_msa` to bf16 before adding `ff*gate_mlp`: one rounding
+  per block instead of diffusers' two. A graph break anywhere between the two updates gives
+  1.000-1.002x, a break before the first update does not (1.186-1.188x); a host CPU emulation of
+  the single rounding reproduces the device ratio at every timestep (1.198x at t=900, device
+  1.190x); rounding `h1` explicitly inside the compiled graph gives 0.966-1.085x on all 8 samples.
+  This rounding is **not less accurate**: over the 7 timesteps the compiled DiT's mean rel-L1 is
+  0.973x the control's, against 1.027x for eager. The t=900 sample fails because the paths that
+  round like diffusers (control, eager) share a lucky low error there (2.515e-03, the lowest of
+  7), not because the compiled error is high (2.994e-03, inside its own 2.58-3.78e-03 range).
+  **No product change is recommended; the recommendation is a multi-sample gate** (see the
+  deep-dive section). Flux's compiled dual blocks, with the same compiler behaviour, score
+  0.897-0.962x on 3 samples.
 * **The other gate fails nowhere.** The cosine floor, finite outputs, identical ranks, zero
   fallbacks and every block compiled all pass in every case, and the cosine is at least 0.999970
   in every case.
@@ -337,9 +353,175 @@ scripts and their outputs are in `J/`.
    * **The e2e check (stage 3) is the integration-level judge,** with 3 steps and the gate on the
      latents.
 
+   The deep dive below confirmed the suspected cause (one rounding of the residual stream per
+   dual block) at the compiler level and located it exactly. Two notes on the experiments above,
+   from what it found: the `dualfused` patch could not test the cause on the device, because the
+   compiler removes an explicit `bf16 -> fp32` round trip the same way; and
+   `--internal-disable-fma-on-ios` was a no-op, because torch-neuronx already passes it to every
+   compile (it is in the tensorizer options of every neuronx-cc log, e.g.
+   `J/s3/art_none/neuronx-cc/*/log-neuron-cc.txt`).
+
+## Compiler-level cause of the full-depth t=900 result (deep dive)
+
+Ran on 2026-10-25 14:28-15:25 UTC (about 1 h of device time) at `eef92d6`. Nothing in the repo
+changed. Every run is TP2, full depth, 5x320x512, unless the table says otherwise, and uses the
+stage-2 oracles. Scripts, logs and JSONs are in `J/s3/`. `debug3.py` wraps
+`check_neuron_hv1_dit.py` and `runq.py` queues its cases; `cpu_acc.py` and `acc_patch.py` run
+the host emulation; `flux_check.py` and `flux_runs.py` run the Flux comparison; `summary.py`
+builds the per-timestep table (`summary.txt`).
+
+### 1. What the compiler is given
+
+With `TORCH_NEURONX_PRESERVE_COMPILATION_ARTIFACTS=1` and `TORCH_NEURONX_DEBUG_DIR=J/s3/art_none`,
+the dual block's FX graph, StableHLO and neuronx-cc work dir were kept (`J/s3/art_none/`). The
+StableHLO is op for op the eager sequence, with every bf16 rounding explicit:
+
+```
+%263 = stablehlo.multiply %254, %262 : tensor<1x1280x3072xbf16>   # attn_out * gate_msa
+%264 = stablehlo.add %arg3, %263 : tensor<1x1280x3072xbf16>       # h1 = h + ...   (bf16)
+%269 = stablehlo.convert %264 : (...xbf16) -> ...xf32             # norm2 input
+...
+%355 = stablehlo.multiply %354, %332 : tensor<1x1280x3072xbf16>   # gate_mlp * ff
+%356 = stablehlo.add %264, %355 : tensor<1x1280x3072xbf16>        # h_out = h1 + ...
+```
+
+The compiler command is `neuronx-cc compile module.mlir --framework XLA --target trn2 --lnc 2 -O2
+--model-type transformer --auto-cast=none` (`compiler.txt`). Its log shows the tensorizer options,
+which include `--accumulate-on-alu-dtype`. That is what neuronx-cc's default
+`--enable-mixed-precision-accumulation` turns on. Its help text says: "Always use full precision of
+the accelerator ALU when we do accumulation, never downcast the input of an accumulation.
+(Default: true)". The counterpart flag `--disable-mixed-precision-accumulation` drops it
+(`J/s3/cc_noacc/`, a host-only recompile of the same module).
+
+### 2. Bisecting the dual block with graph breaks
+
+The dual blocks are compiled with `fullgraph=False`, with `torch._dynamo.graph_break()` at chosen
+points, and the single blocks stay eager. A break forces its tensors out of the graph as bf16.
+The points are p1 after norm1, p2 after attn, p3 after the first gated residual, p4 after norm2,
+p5 after the modulation, and p6 after the ff (`J/s3/brk_*.log`, `q1.log`).
+
+| breaks | ratio at t=900, 20 valid tokens |
+|---|---|
+| none (the whole block in one graph) | **1.186x** (`brk_none.log`, as stage 2's 1.186x) |
+| p1 | 1.188x |
+| p2 | 1.186x |
+| p3 | **1.000x** |
+| p4 | **1.002x** |
+| p5 | **1.001x** |
+| p6 | **1.000x** |
+| p1-p6 | 1.003x |
+
+**Reading.** The excess goes away when `h1` crosses a graph boundary before the second residual
+add. That holds for any break from p3 to p6, so `h1` is stored as bf16 before `h1 + gate_mlp*ff`.
+It stays when only the attention side is split (p1, p2). With p4, p5 or p6, `norm2` still reads
+`h1` inside the same graph as the first add, so norm2 reading an unrounded `h1` is not the cause.
+**The cause is the second residual add taking an `h1` that was never rounded to bf16.** The block
+then rounds its residual stream once, `bf16(h + attn*g1 + ff*g2)`, where diffusers and eager
+round twice.
+
+### 3. Host emulation reproduces the device, timestep by timestep
+
+`cpu_acc.py` runs our port in bf16 on the host CPU (tp1, eager), with the dual block's residual
+chain rounded as `acc_patch.py` selects (`J/s3/cpu_acc.log`). Mode A is
+`bf16(f32(h) + f32(bf16(attn*g1)) + f32(bf16(ff*g2)))`, which only drops the `h1` rounding.
+Mode B also keeps the products in fp32. Mode C also gives norm2 the fp32 `h1`.
+
+| timestep | 950 | 900 | 850 | 700 | 500 | 300 | 100 |
+|---|---|---|---|---|---|---|---|
+| host, stock rounding | 1.005x | 1.005x | 1.004x | 0.998x | 1.007x | 0.998x | 0.982x |
+| host, mode A (no `h1` rounding) | 0.822x | **1.198x** | 0.969x | 0.939x | 0.889x | 0.979x | 0.983x |
+| host, mode B | 0.818x | 1.197x | 0.965x | 0.933x | 0.902x | 0.981x | 0.980x |
+| host, mode C | 0.821x | 1.200x | 0.967x | 0.931x | 0.899x | 0.982x | 0.978x |
+| device, compiled (stage 2) | 0.838x | **1.190x** | 1.054x | 0.940x | 0.891x | 0.943x | 0.998x |
+
+Dropping the one `h1` rounding is enough to move the host from about 1.00x to the device's
+pattern, including the 1.19-1.20x at t=900. Products and norm2 precision barely matter (modes B
+and C). This is the off-device pin of the mechanism. A CPU unit test was not added: no code
+changed, and the emulation needs the 25.6 GB checkpoint.
+
+### 4. Fix candidates measured on the device (all 8 full-depth samples)
+
+Each row covers the 7 timesteps at 20 valid tokens. The 8th sample (t=900, 3 valid tokens) is
+listed separately. Cells give rel-L1 x1e3 and the ratio to the control
+(`summary.txt`; JSONs `J/dit_full{3t,4t}_tp2_*.json`, `J/s3/{nomacc,rbh1}_full_*.json`).
+
+| variant | t950 | t900 | t850 | t700 | t500 | t300 | t100 | mean ratio | max ratio | mean rel-L1 / mean control | t900 vt=3 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| bf16 control rel-L1 (e-3) | 3.083 | 2.515 | 2.852 | 3.307 | 3.105 | 3.013 | 3.789 | | | | 2.452 |
+| compiled (default) | 2.584 (0.838x) | 2.994 (**1.190x**) | 3.007 (1.054x) | 3.108 (0.940x) | 2.765 (0.891x) | 2.841 (0.943x) | 3.781 (0.998x) | 0.979 | 1.190 | **0.973** | 1.049x |
+| eager | 3.049 (0.989x) | 2.530 (1.006x) | 3.210 (1.125x) | 3.304 (0.999x) | 3.183 (1.025x) | 2.984 (0.991x) | 3.995 (1.054x) | 1.027 | 1.125 | 1.027 | NOT MEASURED |
+| compiled, `NEURON_CC_FLAGS=--disable-mixed-precision-accumulation` | 3.224 (1.046x) | 2.697 (1.072x) | 2.798 (0.981x) | 2.908 (0.879x) | 3.057 (0.984x) | 2.884 (0.957x) | 3.254 (0.859x) | 0.968 | 1.072 | 0.961 | 1.078x |
+| compiled, `h1` rounded explicitly in the graph | 3.137 (1.018x) | 2.506 (0.996x) | 3.096 (1.085x) | 3.271 (0.989x) | 3.152 (1.015x) | 2.909 (0.966x) | 3.973 (1.049x) | 1.017 | 1.085 | 1.018 | 0.991x |
+
+"`h1` rounded explicitly" (`HV1_RB=h1` in `debug3.py`) rounds `h1` to bf16 with integer ops: bit
+manipulation for round-to-nearest-even, which the compiler cannot fuse away. The rest is the stock
+compiled path. err_cos against the control's error then comes back to 0.66-0.83, the eager range
+(0.68-0.83), from 0.40-0.75 for default compile. So this one rounding is the whole decorrelation.
+With the flag off, the ratios pass but err_cos stays at -0.10-0.56. *Inference:* the flag changes
+more than this rounding, and other intermediates in other graphs are still kept at higher
+precision.
+
+Speed and HBM, median forward over 2x5 (`J/s3/*.log`; the default-flag 61-frame rows are stage 2's,
+at `88c8e48`):
+
+| variant | TP2 5x320x512 | TP4 5x320x512 | TP2 61x320x512 | TP4 61x320x512 |
+|---|---|---|---|---|
+| default | 206.8 ms (`base_full_v20`) | 229.4 ms (`base_tp4_full_v20`) | 1460.8 ms, 16.18 GiB | 805.6 ms, 11.67 GiB |
+| `--disable-mixed-precision-accumulation` | 205.4 ms | **368.7 ms** (twice: `nomacc_tp4_full_v20{,_r2}`; parity 1.081x) | 1453.8 ms, 16.18 GiB | 803.9 ms, 11.67 GiB |
+| `h1` rounded explicitly | 235.1 ms (+13.7%) | NOT MEASURED | NOT MEASURED | NOT MEASURED |
+
+The flag also recompiles every graph once (its value is part of the NEFF cache key) and is
+process-global (`NEURON_CC_FLAGS`). torch-neuronx has no per-graph compiler option.
+
+### 5. Flux, the same compiler behaviour in another dual-stream model
+
+FLUX.1-dev (19 dual + 38 single blocks), 512x512, TP4 compiled, through `check_neuron_flux_dit.py`
+with the oracle's sigma varied (`flux_check.py`; oracles `J/s3/flux_oracle_512_s*.pt`, logs
+`J/s3/flux_tp4_{default,nomacc}.log`):
+
+| sigma | 0.95 | 0.75 | 0.30 | forward |
+|---|---|---|---|---|
+| bf16 control rel-L1 | 8.771e-03 | 7.712e-03 | 1.038e-02 | |
+| compiled (default) | 0.897x | 0.920x | 0.962x | 96.7 ms |
+| compiled, `--disable-mixed-precision-accumulation` | 0.950x | 1.017x | 0.989x | 97.4 ms |
+
+Flux's dual block has the same chain (`h + gate*attn`, norm2, `h + gate*ff`). The default
+compile, which keeps the stream unrounded, is more accurate than bf16 diffusers on all 3 samples,
+and more accurate than with the flag off.
+
+### 6. Conclusion and recommendation
+
+* **Cause.** neuronx-cc's default mixed-precision accumulation keeps the dual block's
+  mid-block residual stream `h1` unrounded when the block is one graph, so the stream is rounded
+  once per block instead of twice. It is documented, default-on compiler behaviour. It is not a
+  Difflet bug and not a miscompile: per sample it is as accurate as bf16 diffusers or more (mean
+  0.973x over 7 timesteps; Flux 0.897-0.962x). It is **decorrelated** from diffusers' rounding
+  (err_cos about 0.5), so a single sample's ratio to the bf16 control scatters by about ±15%.
+  At t=900 with 20 tokens, diffusers' own rounding happens to land unusually close to fp32
+  (control 2.515e-03, the lowest of 7), and only the paths that round the same way (eager 1.006x,
+  host port 1.005x) share that luck.
+* **No product change.** The two fixes that pass every sample both cost something, and neither
+  improves accuracy against fp32:
+  * The flag is +61% at TP4 5x320x512 and global to the process. It is neutral at the default
+    61-frame shape and at TP2.
+  * Explicit rounding is +13.7% at TP2 and only buys back the correlation with diffusers.
+
+  Both stay available: the flag through `NEURON_CC_FLAGS`, the rounding as a 3-line `rne` in
+  `debug3.py`.
+* **Recommended gate policy for full-depth compiled DiT parity:** pass when the **mean ratio over
+  at least 5 timesteps** (as `--timesteps` already draws) is at most 1.15x, and **every sample is
+  at most 1.25x** (a guard against a real regression in one regime). Keep the single-sample 1.15x
+  gate for truncated depth (all 8 cases pass at 0.948-1.060x) and for the end-to-end latents
+  (1.003x). Under that policy the compiled DiT passes at full depth: mean 0.979x, max 1.190x over
+  7 timesteps; with the 8th sample, mean 0.988x. Under the plan's gate as written, the full-depth
+  TP2 and TP4 rows above stay **FAIL**. Choosing between them is the plan owner's decision; this
+  deep dive changed no status.
+
 ## Bug ledger
 
 Stage 2 (DiT parity) and stage 3 (end to end) found no Difflet bugs and made no fix commits.
+The compiler-level deep dive found no Difflet bug either: the full-depth t=900 excess is
+neuronx-cc's default mixed-precision accumulation (see its section).
 The one environment failure, the missing PATH entry for `neuronx-cc`, is recorded under
 Environment. The CLI runs found three bugs, each fixed in its own commit, and one suspected bug that the device refuted:
 
@@ -362,6 +544,12 @@ Environment. The CLI runs found three bugs, each fixed in its own commit, and on
 * **The full-depth failure, per block:** `J/analyze_blocks2.txt` lists accumulated error by
   channel group, with columns `c_big` and `c_rest`. `J/drift.txt` gives the signed drift per
   massive channel.
+* **The deep dive:** `J/s3/q1.log` .. `q5.log` give one line per case (name, environment, ratio,
+  exit code). To re-run one case, use `python J/s3/runq.py <queue> "<name>|<ENV=v;...>|<check
+  args>"`, for example `"brk_p3|HV1_BRK=p3|"` for a graph break at p3 with the default args, or
+  `"x|NEURON_CC_FLAGS=--disable-mixed-precision-accumulation|--oracle J/hv1_dit_full_v20.pt
+  --tp-degree 2 --exec-mode compile --iters 0"`. The host emulation is
+  `PYTHONPATH=. python J/s3/cpu_acc.py -,A <oracle.pt>...` from the worktree.
 * **Re-run one cell:** `bash J/run.sh <name> --oracle J/hv1_dit_full_v20.pt --tp-degree 2
   --exec-mode compile --out-json J/<name>.json` from the worktree. Check first that no
   `torch.distributed.run` process is alive.
