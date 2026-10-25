@@ -330,3 +330,15 @@ Each item: list a concrete plan and get approval before running anything on the 
 - [ ] **F6 Wan2.1 native vs two-core AoT step gap (+11%).** Pre-existing, unrelated to HunyuanVideo; needs a profile first.
 - [ ] **F7 Six Flux neuron unit tests fail only in full-suite order** (they pass alone; two setup errors likewise). Unrelated to this branch's changes. Estimate: 1 h.
 - [ ] **F8 Units in older trn2 docs.** `neuron_feature_matrix.md`, `neuron_final.md`, `ltx_2_neuron.md` still say "124 GB RAM" for this host (124.8 GiB). Cosmetic, 10 min.
+
+### Approved 2026-10-26: F1 + F2 execution plan
+
+Run as one sequential workflow of subagents (one device job at a time; raw logs under `/home/ubuntu/bench-2026-10-26/`; one commit per device bug with a CPU test where possible).
+
+1. **F2 — bf16 VAE precision on the device.** Per-module bisection on one tile (device bf16 vs host bf16 vs host fp32, forward hooks); find the first op whose error jumps (suspects GroupNorm, Conv3d, SiLU); fix in the style of `core/workarounds.py`'s fp32 LayerNorm (an fp32 workaround or a targeted upcast). Pass: device bf16 full decode ≥ 50 dB PSNR vs the fp32 host decode; the fp32 path unchanged (rel-L1 ≤ 1e-6).
+2. **F1a — a compiled decoder.** Preferred: Difflet's backend-neutral `models/hunyuan_video/vae/modeling_vae.py` decoder with the AoT path's host-side fixed-size tiling (edge tiles padded, one graph), compiled with `torch.compile(backend="neuron")`. Control: `torch.compile` of diffusers' decoder inside diffusers' tiling loop. Measure decode seconds (fp32 and bf16), cold compile, accuracy vs the fp32 host decode.
+3. **F1b — frame write and the separate vae launch.** Split the 22 s write (device→host copy, post-processing, mp4 encode) and cut it. Option A (approved): decode inside the generate launch on rank 0's core after the denoise (implement `enable_vae_decoder`, adjust the CLI stage chain) **if HBM fits** beside the DiT; otherwise keep the one-core vae launch and record why.
+4. **Measure and document.** TP4 full method (cold compile, cold e2e, n=3 warm, step, HBM, frames checked) at the new default; update the native vs AoT table and the evidence doc. Target: warm e2e ≈ 150 s or less (from 222.5 s), decode ≤ 25 s; record actuals if missed.
+5. **Review.** Whole-change review plus adversarial verification of each finding; unit suite vs baseline.
+
+**Default-change rule (approved):** a new path becomes the default only if (a) accuracy holds (bf16 ≥ 50 dB vs the fp32 host decode; a compiled fp32 decoder ≥ 60 dB) and (b) it runs at TP2, TP4 and TP2×CP2; the old path stays reachable by a flag. Otherwise it ships as an opt-in flag.
