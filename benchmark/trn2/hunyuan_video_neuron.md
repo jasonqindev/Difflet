@@ -11,6 +11,8 @@ Every number below comes from a run made for this report and names its run direc
 
 ## TP4: native vs AoT
 
+> **Since `74fc979` (2026-10-26) native decodes in the generate launch with the compiled bf16 decoder by default:** warm e2e at TP4 117.8-130.1 s against AoT's 132.9 s (section "F1b" below; four runs, not this table's full method). The table below is the earlier default (the eager fp32 vae launch).
+
 Native is the neuron backend at its default placement after `d6ffb9a` (host Llama/CLIP encode on rank 0, decode in a one-core vae launch). AoT is the Trainium backend (`--backend trainium`, the NxD venv) with its own default placement: CLIP in a one-core stage, Llama TP4 on the device in a stage of its own, then the DiT and a compiled bf16 VAE decoder (replicated on the four ranks) in the generate stage. Both at tp4. "Compile cold" is `difflet compile` on a fresh cache root.
 
 | metric | native (`tp4_devvae`) | AoT (`aot_tp4`) | native vs AoT | native, host decode (`tp4_default`, the default before `d6ffb9a`) |
@@ -242,6 +244,55 @@ What it took to compile (each found on the device, each worked around in `1c10df
 - **Padding the edge windows without confining the decoder to them (what the AoT path's `_decode_tile` does) is not accurate enough:** the whole fp32 decode on the host with that tiling is at 42.5 dB (rel-L1 1.3e-2, max abs 0.58) against diffusers' tiled decode, and single edge tiles at 40.8-48.8 dB (`B26/f1a/aot_semantics_full.log`, `pad_tile_err.log`), under the 60 dB fp32 gate; hence the valid-extent decoder.
 - **Control: `torch.compile` of diffusers' decoder in diffusers' tiling loop** (`tiling="diffusers"`, compiled block by block: resnets, attention, upsamplers; 12 window shapes): not completed. In bf16 on a fresh root it compiled 39 NEFFs in 32 minutes, then neuronx-cc was killed for lack of host memory (`F137`; the largest process of the run peaked at 118.8 GiB RSS, of the host's 124.8 GiB) while compiling the fused resnet graphs four at a time (`B26/f1a/diffusers_bf16_cold/`). Its resnets are the fused form that decodes 8x slower per resnet above, at 12 window shapes instead of one, so it was not pursued further.
 
+### F1b: the frame write and the decode in the generate launch (2026-10-26)
+
+Raw evidence under `B26/f1b/` (the VAE runs) and `B26/hunyuan_video/f1b_*` (the CLI runs, with `B26/f1b/scripts/hvbench_f1b.py`: `B/scripts/hvbench.py` plus `HVBENCH_WARM_COMPILE=1`, which allows a compile run on an existing root; the observer probe is `B/probe/sitecustomize.py`, copied to `B26/probe/`). The CLI roots `B26/roots/f1b_{tp4,tp2,tp2cp2}` are copies of `B/roots/{tp4_tracecache,tp2,tp2cp2_gather}` (DiT and eager VAE NEFFs) with the compiled decoder's NEFFs of `B26/roots/f1a_fixed_bf16_v2` added (`cp -an`). Every CLI run below is at a clean tree (`dirty=0`): `ecd1b2d` (the `f1b_*_inproc` cells, `--vae-in-process --vae-dtype bf16 --vae-exec-mode compile`), `74fc979` (`f1b_tp4_default`, `f1b_tp4_launch_bf16`) and `bef915e` (`f1b_tp4_launch_fp32eager`; that commit adds only an HTML report). The harness waited for `/dev/neuron0` to be idle before each CLI run, and every run started with no other holder.
+
+**The 21.9 s frame write was the decode finishing.** `B26/f1b/scripts/write_split_device.py` times the vae launch's decode and write part by part on one core (`write_split_eager_fp32/`, `write_split_compiled_bf16/`; `write_split.py` on the host, `write_split_bf16/`):
+
+| decode | `decode()` returns | `torch.neuron.synchronize()` | copy to host | post-processing (VideoProcessor) | uint8 (export_to_video) | x264 encode | the new write (`55ecd5d`): uint8 + encode |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| eager fp32 (the CLI's decoder before `74fc979`), first decode in the process | 78.9 s | **23.1 s** | 0.03 s | 0.07 s | 0.03 s | 0.77 s | 0.11 + 0.69 s |
+| the same, second decode | 40.0 s | 1.2 s | 0.05 s | 0.08 s | 0.02 s | 0.69 s | 0.11 + 0.69 s |
+| compiled bf16, fixed tiles (`decode` returns a host tensor) | 22.4 s, then 16.0 s | 0 | 0.01 s | 0.06-0.08 s | 0.02 s | 0.30-0.34 s | 0.06-0.09 + 0.25-0.26 s |
+
+- Eager on the device is asynchronous: `decode()` returns before the device has finished, and the first `.cpu()` in `_write_video` waited for it, so the probe's "frames to mp4" span held the end of the decode (23.1 s here, 21.9 s in `tp4_devvae/gen1`). The write itself is under a second.
+- **`55ecd5d`** builds the uint8 frames in one pass of torch ops (the same fp32 arithmetic and truncation as VideoProcessor + export_to_video) and encodes them with export_to_video's imageio settings: the same uint8 frames and the same mp4 bytes in every case above, 0.32-0.34 s instead of 0.39-0.45 s after the compiled decoder. The CLI now prints the split; in the eager fp32 vae launch it reads "to uint8 21.24 s, encode 0.65 s" (`f1b_tp4_launch_fp32eager/gen0/run.log`): the sync is in the first number. The AoT `_save_video` is unchanged.
+
+**The compiled decoder's warm-up decodes one tile (`55761f5`).** Every fixed tile has one shape, so the first tile builds or loads all 26 graphs; the warm-up no longer decodes the whole clip. On one core, warm root: warm-up 6.72 s, then decodes of 15.96 and 15.97 s (first decode in a process without a warm-up: 22.3 s), no new NEFF, 56.07 dB as before (`B26/f1b/warmup_tile_bf16/`). This matters for the decode in the generate launch, which warms the decoder up in every launch.
+
+**The decode in the generate launch (option A, `ecd1b2d`; the default from `74fc979`).** `--vae-in-process`: rank 0 loads the compiled bf16 decoder after its DiT shard and the host text encoder, and decodes after the denoise inside a status-synced phase, while the other ranks wait in the phase's all-reduce; rank 0 writes the latents and the mp4. One launch instead of two. At each layout a compile (warm root) and two generates, 320x512x61, 50 steps:
+
+| | TP4 (`f1b_tp4_inproc`) | TP2 (`f1b_tp2_inproc`) | TP2xCP2 gather_kv (`f1b_tp2cp2_inproc`) |
+|---|---:|---:|---:|
+| e2e warm, gen0 / gen1 | **127.4 / 117.8 s** | **157.3 / 164.3 s** | **138.9 / 127.6 s** |
+| the same layout with the eager fp32 vae launch (*reused*, above) | 239.1 s (222.5 s after `f4d9ac1`) | 300.9 s | 250.0 s |
+| DiT step median | 807.7 / 808.6 ms | 1461.9 / 1463.0 ms | 905.5 / 905.4 ms |
+| decoder load + warm-up (rank 0, in the load phase) | 1.13 + 6.20 s | 1.11 + 6.43 s | 1.17 + 6.24 s |
+| decode / write (gen1) | 15.98 / 0.84 s | 15.98 / 0.87 s | 15.96 / 0.84 s |
+| peak HBM, rank 0's core: alloc / neuron-monitor | **14.74 / 17.95 GiB** | **19.24 / 23.50 GiB** | **19.24 / 22.85 GiB** |
+| peak HBM, the other DiT cores | 11.67 / 12.98 GiB | 16.18 / 18.71 GiB | 15.83 / 18.00 GiB |
+| compile (warm root): wall | 354.8 s (the checkpoint and Llama/CLIP not in the page cache: load 194.9 s + 119.4 s) | 217.6 s (warm-up forward 171.3 s) | 164.0 s (warm-up forward 105.1 s) |
+| output | 61 frames, `edf8d6be…`, latents `b62d0891…` (as `tp4_devvae`) | 61 frames, `3f444adc…`, latents `3d0b647e…` (as `tp2`) | 61 frames, `32dc3374…`, latents `b50ce0c8…` (as `tp2cp2_gather`) |
+
+- **The warm TP4 e2e falls from 222.5-239.1 s to 117.8-130.1 s** (four runs at two commits: 127.4, 117.8 at `ecd1b2d` with the flags; 120.7, 130.1 at `74fc979` with no flag, `f1b_tp4_default/`), against AoT's 132.9 s. The spread is the launch jitter of open issue 2 of `neuron_final.md` (rank 0's start-to-load 10.6-22.3 s in these four runs). The plan's targets (warm e2e about 150 s or less, decode 25 s or less) are met at TP4, TP2xCP2 and TP2. Split of `f1b_tp4_inproc/gen1`: launch 2.7 + 10.6 s, load + warm-up 42.0 s (of which the decoder 7.3 s), host encode 2.2 s, denoise 40.4 s, decode 16.0 s, write 0.8 s, teardown and exit 3.0 s.
+- **It fits beside the DiT at all three layouts.** The decoder adds 3.07 GiB allocated at TP4 and 3.06-3.41 GiB at TP2 and TP2xCP2 (5.0, 4.8 and 4.85 GiB by neuron-monitor). At TP2 rank 0's core peaks at 23.50 of 24 GiB by neuron-monitor: 0.5 GiB to spare. Options that add HBM at TP2 (none measured) could push it over; `--device-vae` keeps the decoder off the DiT's cores. The decode takes the same 16.0 s at every layout: no sign of memory pressure in its time.
+- **The decode is the same decode.** `B26/f1b/scripts/standalone_vs_inproc.py` decoded each layout's gen1 latents with the standalone decoder on one core and wrote them through `_write_video`: the three mp4s are byte-identical to the in-process ones (`B26/f1b/standalone_vs_inproc/run.log`). The TP2 latents are the F1a reference latents (`J/cli/tp2_host.work/latents.pt`, `torch.equal`), and that decode is 56.07 dB, rel-L1 3.73e-3, against the fp32 host decode (`tp2_vs_fp32_host.log`).
+- **Every run of a cell produced the same mp4 and latents**, and the TP4 mp4 is the same with the decode in process (`f1b_tp4_inproc`, `f1b_tp4_default`) and in the vae launch with the same decoder (`f1b_tp4_launch_bf16`): `edf8d6be…`.
+
+**The default-change rule (`74fc979`).** (a) Accuracy: the compiled bf16 decoder is at 56.07 dB against the fp32 host decode (gate 50 dB); (b) it runs at TP2, TP4 and TP2xCP2 (table above). So the CLI now decodes in the generate launch with the compiled bf16 decoder when no flag says otherwise. The earlier paths stay reachable and were run at TP4 after the flip:
+
+| flags | what runs | e2e warm, gen0 / gen1 | decode | output | logs |
+|---|---|---:|---:|---|---|
+| (none, the default) | in process, compiled bf16 | 120.7 / 130.1 s | 16.0 s | `edf8d6be…` | `f1b_tp4_default/` |
+| `--device-vae` | one-core vae launch, compiled bf16 (load 12.3 s, first decode of the process 22.0 s) | 135.8 / 149.5 s | 22.0 s | `edf8d6be…` | `f1b_tp4_launch_bf16/` |
+| `--device-vae --vae-dtype fp32 --vae-exec-mode eager` | the default before `74fc979` | 223.1 / 211.7 s | 73.7-74.1 s (+ 21.2 s sync in the write) | `68adae23…`, the same mp4 as `tp4_devvae` | `f1b_tp4_launch_fp32eager/` |
+| `--host-vae` | diffusers fp32 on the host | not re-run (CPU tests only) | | | |
+
+- New flags: `--vae-in-process` (the default placement), `--vae-dtype bf16|fp32` and `--vae-exec-mode eager|compile` (the device decoder in either placement; default bf16, compile; refused with `--host-vae`). More than one of `--host-vae`, `--device-vae` and `--vae-in-process` is refused. The driver forwards its resolved choice to the stages (`--vae-placement`), so a stage never applies a default of its own.
+- `compile` with the default placement is one generate launch: its warm-up also warms the decoder (7.3 s warm; about 135 s for the decoder's graphs on a root without them, F1a), and there is no vae launch, so open issue 2 (the compile-mode vae launch's 927 s exit) no longer applies by default. The compile runs above took 354.8, 217.6 and 164.0 s of wall against their stages' 346.2, 209.6 and 155.7 s.
+- Not measured here (left for the TP4 full-method stage): a cold compile on a fresh root, a cold e2e with the page cache dropped, n=3 warm runs at the new default, and the native vs AoT table at the top of this report, which still shows the eager fp32 vae launch.
+
 ## Extra cells (n=2)
 
 | cell | DiT step median / p10 / p90 (ms) | e2e warm (s) | other | log |
@@ -264,14 +315,16 @@ What it took to compile (each found on the device, each worked around in `1c10df
 
 ## Open issues
 
-1. **The vae launch's cold compile is 29 minutes** (3,751 eager per-op NEFFs) and a fresh vae process's first decode takes 95 s against 41 s for later decodes in the same process (*inference:* the difference is loading those NEFFs). **Addressed, opt-in, by `1c10dfc`** ("F1a: a compiled decoder"): the compiled bf16 decoder compiles in 135 s into 26 NEFFs and decodes in 22.3 s first in a process, 16.0 s after; the CLI does not use it yet.
-2. **After the compile-mode warm-up decode, the vae launch took 927 s to exit** (the rank's last Python `atexit` handler ran at 1949.3 s; torchrun returned at 2876.6 s; `B/hunyuan_video/tp4_devvae/compile/summary.json`). Generate-mode vae launches exit 3–4 s after the mp4 is written. *Inference:* process teardown after a compile of 3,751 NEFFs (runtime unload or compile-cache flush); not investigated. It adds 15 minutes to the cold compile above.
-3. **Fixed (`2e04372`): the eager bf16 decoder on a NeuronCore was inaccurate** (20.8 dB against the fp32 decode, visible banding): the device's bf16 GroupNorm loses precision as the group grows. With its statistics in fp32 the device's bf16 decode is at 55.9 dB, as on the host ("F2: bf16 VAE precision on the device"). The CLI still decodes in fp32.
+1. **The vae launch's cold compile is 29 minutes** (3,751 eager per-op NEFFs) and a fresh vae process's first decode takes 95 s against 41 s for later decodes in the same process (*inference:* the difference is loading those NEFFs). **Addressed, opt-in, by `1c10dfc`** ("F1a: a compiled decoder"): the compiled bf16 decoder compiles in 135 s into 26 NEFFs and decodes in 22.3 s first in a process, 16.0 s after. **The CLI's default from `74fc979`**, in the generate launch ("F1b"); `--vae-dtype fp32 --vae-exec-mode eager` keeps the eager decoder.
+2. **After the compile-mode warm-up decode, the vae launch took 927 s to exit** (the rank's last Python `atexit` handler ran at 1949.3 s; torchrun returned at 2876.6 s; `B/hunyuan_video/tp4_devvae/compile/summary.json`). Generate-mode vae launches exit 3–4 s after the mp4 is written. *Inference:* process teardown after a compile of 3,751 NEFFs (runtime unload or compile-cache flush); not investigated. It adds 15 minutes to the cold compile above. Since `74fc979` the default compile has no vae launch (the decoder warms up in the generate launch), so this applies only with `--device-vae`; not re-measured with the compiled decoder there.
+3. **Fixed (`2e04372`): the eager bf16 decoder on a NeuronCore was inaccurate** (20.8 dB against the fp32 decode, visible banding): the device's bf16 GroupNorm loses precision as the group grows. With its statistics in fp32 the device's bf16 decode is at 55.9 dB, as on the host ("F2: bf16 VAE precision on the device"). The CLI decodes in bf16 (compiled) by default from `74fc979`.
 4. **The warm-up forward of every generate launch** was 36.5 s at tp4 with all NEFFs cached (TP2: 63.5 s, TP2xCP2: 36.8 s), about as long as the 50-step denoise. **Mostly fixed by `f4d9ac1`** (the NKI trace cache): 13.5 s at tp4. The remaining 13.5 s was not broken down.
 5. **Full-depth DiT parity on the t=900 / 20-token oracle** stays at 1.19x the control for every compiled layout (`docs/verification/hunyuan-video-neuron-evidence.md`); a gating decision is pending with the plan owner.
 6. **The first generate on a freshly compiled root can compile a small graph** (one neuronx-cc subprocess of 5.7 s in `tp2/cold`, three records over 9 s in the tp4 cold runs; none in any warm run, `unwarmed_shapes` empty). Not identified; it costs seconds once per root.
 7. **720x1280x129 does not compile on trn2.3xlarge** (section "720x1280x129"): with the bounded attention kernel split to one head per call, neuronx-cc's block-graph compile is OOM-killed at 109.8 GiB of host memory (of 124.8 GiB). Untried options and their cost are listed there.
 8. **Editing `difflet/backends/neuron/ops_impl/attention.py` recompiles every cached block graph once** (the graphs carry its source lines; *inference* from the NEFFs' debug metadata and the recompiles after `ce9d212` and `195fc8c`). Not a Difflet bug, but a cache that survives code edits would need torch-neuronx to key graphs without source locations.
+
+9. **With the decode in the generate launch, TP2 leaves 0.5 GiB of HBM on rank 0's core** (23.50 of 24 GiB by neuron-monitor, 19.24 GiB allocated; "F1b"). The three default layouts fit; an option that adds HBM at TP2 was not measured. `--device-vae` keeps the decoder in a launch of its own.
 
 ## Reproduction
 
@@ -280,12 +333,15 @@ What it took to compile (each found on the device, each worked around in `1c10df
 R=<fresh root>
 DIFFLET_COMPILE_CACHE=$R HF_HUB_OFFLINE=1 python -m difflet.cli.main compile --backend neuron \
   --model-id hunyuanvideo-community/HunyuanVideo --revision e8c2aaa66fe3742a32c11a6766aecbf07c56e773 \
-  --height 320 --width 512 --num-frames 61 --tp-degree 4 [--sp] [--host-vae|--device-vae] --cache-dir $R
+  --height 320 --width 512 --num-frames 61 --tp-degree 4 [--sp] [--host-vae|--device-vae|--vae-in-process] \
+  [--vae-dtype bf16|fp32] [--vae-exec-mode compile|eager] --cache-dir $R
 #   other layouts: --tp-degree 2, or --tp-degree 2 --cp-degree 2 --cp-mode gather_kv; 720p: --height 720 --width 1280 --num-frames 129
+#   decode: in the generate launch, compiled bf16, by default from 74fc979 (the runs before it: the eager fp32 vae launch,
+#   now --device-vae --vae-dtype fp32 --vae-exec-mode eager)
 DIFFLET_COMPILE_CACHE=$R HF_HUB_OFFLINE=1 python -m difflet.cli.main generate --backend neuron \
   --model-id hunyuanvideo-community/HunyuanVideo --revision e8c2aaa66fe3742a32c11a6766aecbf07c56e773 \
-  --height 320 --width 512 --num-frames 61 --tp-degree 4 [--sp] [--host-vae|--device-vae] \
-  [--teacache-cadence 2] --steps 50 --guidance-scale 6.0 --seed 42 \
+  --height 320 --width 512 --num-frames 61 --tp-degree 4 [--sp] [--host-vae|--device-vae|--vae-in-process] \
+  [--vae-dtype bf16|fp32] [--vae-exec-mode compile|eager] [--teacache-cadence 2] --steps 50 --guidance-scale 6.0 --seed 42 \
   --prompt "a cinematic shot of a red fox running through a snowy forest" --output out.mp4 --cache-dir $R
 # AoT: the same with the NxD venv (/home/ubuntu/venvs/difflet-neuron) and --backend trainium
 #   (no DIFFLET_COMPILE_CACHE); pass --steps 50 (the AoT HunyuanVideo CLI defaults to 4)
