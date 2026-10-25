@@ -177,6 +177,42 @@ Times from the probe events (`B/hunyuan_video/<cell>/gen1/summary.json`; `B/scri
 - **Most of a fresh process's first decode is not compute:** 95 s first vs 41 s later in fp32, 52 vs 18 s in bf16. *Inference:* the extra 54 s / 34 s is loading the ~3,750 eager NEFFs on first use. A decoder that stayed resident (as in serving) would decode in 41 s.
 - **Comparing mp4s is misleading for this.** Writing the device fp32 decode and the host fp32 decode through the CLI's own `_write_video` (`B/scripts/write_mp4.py`): before encoding, 809 of 29,982,720 8-bit values differ, by 1 level; after x264 the two mp4s differ by 2.06 levels on average (37.8 dB, max 91) (`B/hunyuan_video/vae/mp4_encode_check/`). The host- and device-decoded mp4s of the tp4 cells differ by the same amount (1.83 levels, 38.1 dB) for the same reason. Compare decoded tensors, not mp4s.
 
+### F2: bf16 VAE precision on the device (2026-10-26)
+
+Raw evidence under `/home/ubuntu/bench-2026-10-26/` (`B26` below); the decoder runs above (`J`, `B`) are unchanged. Native venv and toolchain as in "Toolchain". During these runs another session's unit tests held `/dev/neuron0` open (torch-neuronx opens it at `import torch`; each run's `summary.json` lists the holders); neuron-monitor recorded no runtime but ours.
+
+**Cause: the device's bf16 GroupNorm.** Bisection on the first tile of the tiled decode (`latents[:, :, 0:5, 0:32, 0:32]` / scaling factor through `post_quant_conv` + decoder; forward hooks on all 174 module calls; device bf16 and host bf16 against host fp32; `B26/f2/bisect/`, script `B26/scripts/f2_bisect.py`):
+
+- Accumulated: the tile's output is 0.329 rel-L1 on the device against 3.3e-3 for host bf16. The device stays within 2-6x of the host through the mid-block and up_blocks 0-1 (GroupNorm-led). It jumps at `up_blocks.2.resnets.0.norm1` (0.385 vs 1.8e-2) and `up_blocks.3.resnets.0.norm1` (1.55 vs 1.0e-2).
+- Each module alone on the fp32 input cast to bf16: the device's GroupNorm error grows with the elements per group: 6e-3 to 2e-2 at 81,920; 3e-2 to 4e-2 at 327,680; 0.20 to 0.38 at 1.2M to 2.4M; 1.35 to 2.05 at 4.5M to 8.9M. Host bf16 is 2.2e-3 to 3.8e-3 at every size. Conv3d, SiLU, the upsampling and `to_out` match the host exactly (1.00x); `to_q/k/v` are 0.82-0.93x; the attention block is 2.4x, which is its own GroupNorm. *Inference:* the device kernel accumulates the group statistics at bf16 precision; the AoT path's `_Fp32GroupNorm` (`models/hunyuan_video/vae/modeling_vae.py`) works around the same thing.
+- Fix `2e04372`: `install_group_norm_fp32` (`core/workarounds.py`, installed by `prepare_runtime`) computes bf16 `F.group_norm` on neuron tensors in fp32. No DiT on the backend uses GroupNorm, so DiT numerics and speed are unchanged by construction.
+
+**Micro-test** (`B26/scripts/f2_gn_micro.py`, `B26/f2/gn_micro.log`): `F.group_norm` alone on one core, 32 groups, random inputs (mean 0 and mean 2) at the decoder's shapes plus the real input to `up_blocks.3.resnets.0.norm1`, rel-L1 against fp32 on the host:
+
+| elements per group | host bf16 | device bf16, raw kernel | device bf16 through `F.group_norm` (the workaround) | device fp32 |
+|---:|---:|---:|---:|---:|
+| 81,920 | 2.3e-3 / 4.3e-3 | 3.4e-3 / 6.6e-3 | 2.3e-3 / 4.3e-3 | 7.9e-8 / 2.2e-7 |
+| 327,680 | 2.4e-3 / 4.3e-3 | 7.0e-3 / 4.3e-2 | 2.4e-3 / 4.3e-3 | 9.3e-8 / 4.5e-7 |
+| 1,179,648 | 2.4e-3 / 4.3e-3 | 0.50 / 1.47 | 2.4e-3 / 4.3e-3 | 1.4e-7 / 8.7e-7 |
+| 2,359,296 | 2.4e-3 / 4.3e-3 | 1.12 / 2.91 | 2.4e-3 / 4.3e-3 | 2.2e-7 / 9.2e-7 |
+| 4,456,448 | 2.4e-3 / 4.3e-3 | 1.91 / 3.21 | 2.4e-3 / 4.3e-3 | 2.4e-7 / 1.7e-6 |
+| 8,912,896 | 2.4e-3 / 4.3e-3 | 3.11 / 4.83 | 2.4e-3 / 4.3e-3 | 3.2e-7 / 1.9e-6 |
+| 8,912,896, real input | 2.4e-3 | 1.53 | 2.4e-3 | 6.9e-7 |
+
+With the workaround the device's bf16 result equals the host's to within 1e-7 of rel-L1 at every size.
+
+**Full decode** of `J/cli/tp2_host.work/latents.pt` against `J/vae_cpu_fp32.pt`, the same decoder as the table above (`NeuronHunyuanVideoVaeDecoderApplication`, eager, one core) at `2e04372`, through `B26/f1a/scripts/vaebench2.py` with `vae_repeat2.py` (`vae_repeat.py` plus the F1a options, defaults unchanged):
+
+| decode | first decode in a fresh process (s) | later decodes, same process (s) | compile | peak HBM alloc / neuron-monitor (GiB) | vs fp32 host decode | log |
+|---|---:|---:|---|---:|---|---|
+| device, bf16, `2e04372` | 55.0 (warm root) | 20.2, 20.1; 20.5, 20.6 | first decode on the bf16 root of the run above: 357.0 s, 207 new NEFFs (3,784 → 3,991) | 6.80 / 13.75-13.84 | rel-L1 **3.80e-3**, max abs 0.067, mean abs 0.31 grey levels, PSNR **55.9 dB** (was 20.8 dB) | `B26/f2/f2_neuron_bf16_gnfp32/`, `f2_neuron_bf16_gnfp32_warm/` |
+| device, fp32, `2e04372` | 100.4 | 43.2 | none (3,871 NEFFs before and after, on a copy of `tp4_devvae`'s root) | 11.53 / 20.27 | rel-L1 3.48e-7, PSNR 136.7 dB; **bit-identical** to the pre-fix decode (`torch.equal` with `B/hunyuan_video/vae/neuron_fp32.pt`) | `B26/f2/f2_neuron_fp32_gnfp32/` |
+
+- **The device's bf16 decode is now as accurate as bf16 on the host** (55.9 dB, rel-L1 3.8e-3 in both), against the 50 dB gate. Every decode, in both processes, is bit-identical to the first.
+- **fp32 is untouched**, as the wrapper only acts on bf16: same output bit for bit, no new kernel. Its times (100.4 / 43.2 s) are 5% above the earlier 95.0-95.9 / 40.7-41.0 s; the other session's tests were using the host CPUs at the time (*inference*: eager dispatch is host-bound).
+- **bf16 decodes 2.1x faster than fp32** in the same process (20.1-20.6 s vs 43.2 s); the fp32 statistics cost about 10% against the inaccurate bf16 kernel (18.3-18.8 s before the fix).
+- The CLI still builds the decoder in fp32 (amendment A6). A bf16 default goes through the plan's default-change rule.
+
 ## Extra cells (n=2)
 
 | cell | DiT step median / p10 / p90 (ms) | e2e warm (s) | other | log |
@@ -201,7 +237,7 @@ Times from the probe events (`B/hunyuan_video/<cell>/gen1/summary.json`; `B/scri
 
 1. **The vae launch's cold compile is 29 minutes** (3,751 eager per-op NEFFs) and a fresh vae process's first decode takes 95 s against 41 s for later decodes in the same process (*inference:* the difference is loading those NEFFs). Options, not tried: compile the decoder's tile function per block as the DiT is (fewer, larger NEFFs), or keep the decoder resident across requests (serving).
 2. **After the compile-mode warm-up decode, the vae launch took 927 s to exit** (the rank's last Python `atexit` handler ran at 1949.3 s; torchrun returned at 2876.6 s; `B/hunyuan_video/tp4_devvae/compile/summary.json`). Generate-mode vae launches exit 3–4 s after the mp4 is written. *Inference:* process teardown after a compile of 3,751 NEFFs (runtime unload or compile-cache flush); not investigated. It adds 15 minutes to the cold compile above.
-3. **The eager bf16 decoder on a NeuronCore is inaccurate** (20.8 dB against the fp32 decode, visible banding) while the same decoder in bf16 on the host is at 55.9 dB. Not reachable from the CLI (the vae launch builds the decoder in fp32), so it blocks only a bf16 default, which would decode 2.2x faster. Suspected cause, not verified: one of the eager ops (the decoder's GroupNorm or causal Conv3d) losing precision in bf16 on the device; bisecting it op by op against the host bf16 decode is the next step.
+3. **Fixed (`2e04372`): the eager bf16 decoder on a NeuronCore was inaccurate** (20.8 dB against the fp32 decode, visible banding): the device's bf16 GroupNorm loses precision as the group grows. With its statistics in fp32 the device's bf16 decode is at 55.9 dB, as on the host ("F2: bf16 VAE precision on the device"). The CLI still decodes in fp32.
 4. **The warm-up forward of every generate launch** was 36.5 s at tp4 with all NEFFs cached (TP2: 63.5 s, TP2xCP2: 36.8 s), about as long as the 50-step denoise. **Mostly fixed by `f4d9ac1`** (the NKI trace cache): 13.5 s at tp4. The remaining 13.5 s was not broken down.
 5. **Full-depth DiT parity on the t=900 / 20-token oracle** stays at 1.19x the control for every compiled layout (`docs/verification/hunyuan-video-neuron-evidence.md`); a gating decision is pending with the plan owner.
 6. **The first generate on a freshly compiled root can compile a small graph** (one neuronx-cc subprocess of 5.7 s in `tp2/cold`, three records over 9 s in the tp4 cold runs; none in any warm run, `unwarmed_shapes` empty). Not identified; it costs seconds once per root.
