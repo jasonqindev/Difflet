@@ -1,17 +1,21 @@
-# HunyuanVideo 1.0 on the neuron backend: on-device evidence (DiT parity per layout)
+# HunyuanVideo 1.0 on the neuron backend: on-device evidence (DiT parity per layout, end to end, CLI)
 
 Campaign: 2026-10-24, device runs 21:31-22:35 UTC. Host: `trn2.3xlarge`, 1 Neuron device, 4 logical
 NeuronCores (logical config 2), 24 GiB HBM per logical core, 12 vCPUs, 124 GB RAM. Branch
 `feat/hunyuan-neuron` at `88c8e48`; no code changed during the campaign.
 
-This doc covers Task 8, stage 2 of `docs/superpowers/plans/2026-10-24-hunyuan-video-neuron.md`.
-That stage checks DiT parity on the device at every layout, at truncated depth and at full depth,
-and runs the compiled mask-bounds regression. The end-to-end check, the CLI runs and the benchmark
-doc are later stages and are not covered here.
+This doc covers Task 8 of `docs/superpowers/plans/2026-10-24-hunyuan-video-neuron.md`. Stage 2
+checks DiT parity on the device at every layout, at truncated depth and at full depth, and runs the
+compiled mask-bounds regression (sections Summary to Bug ledger). Stage 3, the end-to-end parity
+check, ran right after it (2026-10-24 22:41-23:02 UTC, code unchanged: `b38f3bc` only added this
+doc). The CLI runs (stage 4) ran on 2026-10-25 at `d6ffb9a` (TP4) and `4c38a58` (TP2, TP2xCP2,
+720p); neither commit after `d6ffb9a` touched code. See "End to end" and "CLI runs" below; the
+timings are reported in `benchmark/trn2/hunyuan_video_neuron.md`.
 
 Logs, result JSONs, oracles and diagnosis dumps are kept outside the repo, as the job rules
-require, under `J = /home/ubuntu/.claude/jobs/28e8164e/tmp/hv1_device/`. Every number below comes
-from a file in `J/`. Statements marked *inference* are explanations that no run measured directly.
+require, under `J = /home/ubuntu/.claude/jobs/28e8164e/tmp/hv1_device/`; the CLI runs' evidence is
+under `B = /home/ubuntu/bench-2026-10-25/`. Every number below comes from a file in `J/` or `B/`.
+Statements marked *inference* are explanations that no run measured directly.
 
 Statuses: **PASS** (ran on the device in this campaign and met its gate) · **FAIL** (ran and
 missed the gate) · **NOT MEASURED** (not run in this stage).
@@ -46,8 +50,17 @@ missed the gate) · **NOT MEASURED** (not run in this stage).
   eager 1802.1 ms. At 61x320x512: **TP2 1460.8 ms, TP4 805.6 ms.**
 * **Compiled mask bounds: 72/72 counts exact on a NeuronCore.** The checks cover the key bounds,
   ulysses `key_valid_len` and ring `text_valid_len`, at 1,536, 10,496 and 20,096 keys.
-
-## Environment
+* **End to end (stage 3), 3 steps at full depth: PASS** at TP2 (1.003x the control), with our
+  host encoder (encoder outputs equal to diffusers'), and at TP2xCP2 gather_kv (1.021x).
+* **CLI (stage 4), 320x512x61, 50 steps: TP2, TP4 and TP2xCP2 gather_kv all PASS** (playable
+  61-frame mp4 showing the prompt, bit-identical outputs within each cell). Step 1461.8 / 808.3 /
+  905.1 ms; warm e2e 300.9 / 239.1 / 250.0 s. TP4 is the fastest layout.
+* **Two bugs fixed during the CLI runs:** the decode default (`d6ffb9a`) and the missing NKI
+  trace-cache opt-in that made 720p trace the attention kernel for 30+ minutes per process
+  (`f4d9ac1`). A third (`15b503f`, `ce9d212`) splits the bounded attention kernel over heads
+  past a size whose NKI compile overflows. See the bug ledger.
+* **720x1280x129 at TP4: BLOCKED.** After those fixes the block graph's neuronx-cc compile needs
+  more than the host's 124 GB and is OOM-killed; no forward ran (see "CLI runs").
 
 | item | value |
 |---|---|
@@ -187,6 +200,57 @@ samples.
 1,536, 10,496 and 20,096, including 19,858 valid keys at 20,096, the Trainium failure case.
 Wall time 36 s. Log `J/mask_bounds.log`, results `J/mask-bounds/results.json`.
 
+### End to end (stage 3): latents after 3 steps against diffusers' fp32 pipeline
+
+`tests/manual/check_neuron_hv1_e2e.py`, full depth, 5x320x512, 3 steps, seed 42, the script's
+prompt ("A cat walks on the grass, realistic style.", 11 valid of 256 tokens). The reference is
+diffusers' `HunyuanVideoPipeline` in fp32 on the host and the control the same pipeline in bf16,
+both from the same bf16 prompt embeddings (`J/e2e_ref_f5.log`: fp32 76 s, bf16 28 s, control
+rel-L1 7.575e-02, cos 0.996937, written to `J/hv1_e2e_ref_f5.pt`). The gate is the same 1.15x of
+the control's rel-L1, plus `err_cos >= 0.5`. One reference sample was drawn.
+
+| layout | gate | ours rel-L1 | ratio | cosine | err_cos | other checks | step times (s) | peak HBM GiB | log |
+|---|---|---|---|---|---|---|---|---|---|
+| TP2 compile | **PASS** | 7.601e-02 | 1.003x | 0.996888 | 0.994 | finite, no fallbacks, no unwarmed shapes, 3 steps | 1.55, 0.22, 0.21 | 15.61 | `J/e2e_tp2.log` |
+| TP2 compile, our rank-0 host encoder (`--encode`) | **PASS** | 7.601e-02 | 1.003x | 0.996888 | 0.994 | encoder hidden states and pooled projection rel-L1 0 against diffusers' `encode_prompt`, mask equal (11 valid) | 2.19, 0.22, 0.22 | 15.61 | `J/e2e_tp2_encode.log` |
+| TP2xCP2 gather_kv compile | **PASS** | 7.737e-02 | 1.021x | 0.996789 | 0.995 | as TP2, on all 4 ranks | 2.09, 0.62, 0.62 | 15.56 | `J/e2e_tp2cp2_gather.log` |
+
+The full-depth DiT failure on the single t=900 / 20-token input (above) does not show at the
+integration level: after 3 denoising steps the compiled TP2 latents are 1.003x the control.
+
+### CLI runs (stage 4): `difflet generate --backend neuron`, 320x512x61, 50 steps
+
+Seed 42, guidance 6.0, prompt "a cinematic shot of a red fox running through a snowy forest",
+`HF_HUB_OFFLINE=1`, pinned revision, default placement (host encode on rank 0, decode in the
+one-core fp32 vae launch). Each cell: a cold compile on a fresh root, a generate with the page
+cache dropped, a discarded warm generate, then n timed warm generates, through the harness
+`B/scripts/hvbench.py` (method and numbers in `benchmark/trn2/hunyuan_video_neuron.md`). Gate:
+exit 0, a playable mp4 of 61 frames at 320x512 with moving content (every frame's pixel std at
+least 49 grey levels, mean frame-to-frame difference 32 levels), and a mid frame that shows the
+prompt (opened: a red fox running through snow in every cell), `unwarmed_shapes=[]`, no
+fallbacks, 60 of 60 blocks compiled, and the same latents in every generate of a cell.
+
+| layout | gate | DiT step median (ms) | e2e warm (s) | e2e cold (s) | peak HBM alloc / neuron-monitor (GiB) | latents (all runs of the cell) | evidence |
+|---|---|---|---|---|---|---|---|
+| TP2 | **PASS** | 1461.8 (n=2) | 300.9 | 629.4 | 16.18 / 18.71 | `3d0b647e…`, 4 of 4 equal | `B/hunyuan_video/tp2/` |
+| TP4 | **PASS** | 808.3 (n=3) | 239.1 | 570.4 | 11.67 / 12.98 | `b62d0891…`, 5 of 5 equal | `B/hunyuan_video/tp4_devvae/` |
+| TP2xCP2 gather_kv | **PASS** | 905.1 (n=2) | 250.0 | 567.8 | 15.89 / 18.00 | `b50ce0c8…`, 4 of 4 equal | `B/hunyuan_video/tp2cp2_gather/` |
+| TP4, 720x1280x129 | **BLOCKED** | — (no forward ran) | — | — | 11.83 / 12.29 (weights only) | — | `B/hunyuan_video/tp4_720p.*/` |
+
+**720x1280x129 (119,056 joint tokens) does not compile on this host.** Four `difflet compile`
+attempts at TP4 (`benchmark/trn2/hunyuan_video_neuron.md`, "720x1280x129"): (1) the attention
+kernel's NKI trace ran for 30+ minutes in every process, fixed by `f4d9ac1`; (2) the bounded
+kernel's NKI compile failed, `BIR emission failed: colz: body blob exceeds uint32 offset range`,
+at 6 heads x 119,168^2 per call; (3) the same at 3 heads (`15b503f`); (4) at one head per call
+(`ce9d212`) the kernel compiles, and neuronx-cc compiling the block graph was OOM-killed at
+115.2 GB of the host's 124 GB (`[F137]`, exit code 70). The DiT weights load (11.83 GiB per
+core); the activation HBM at this shape was never reached.
+
+The plan's Step 4 names TP2xCP2 ulysses; the CP cell ran gather_kv instead because it was the
+fastest CP mode in the DiT checks above (649.7 ms per full-depth forward against ring 672.7 and
+ulysses 1148.3). Ulysses and ring have the same DiT parity results as gather_kv (PASS at truncated
+depth, 1.188x and 1.190x on the full-depth t=900 input), but their CLI runs are **NOT MEASURED**.
+
 ## Diagnosis of the full-depth t=900 failure
 
 We followed the systematic-debugging protocol and gathered evidence before trying any fix. The
@@ -275,8 +339,16 @@ scripts and their outputs are in `J/`.
 
 ## Bug ledger
 
-No Difflet bugs were found and no fix commits were made. The one environment failure, the
-missing PATH entry for `neuronx-cc`, is recorded under Environment.
+Stage 2 (DiT parity) and stage 3 (end to end) found no Difflet bugs and made no fix commits.
+The one environment failure, the missing PATH entry for `neuronx-cc`, is recorded under
+Environment. The CLI runs found three bugs, each fixed in its own commit, and one suspected bug that the device refuted:
+
+| # | layout | symptom | root cause | fix |
+|---|---|---|---|---|
+| 1 | TP4, 320x512x61 | the default host decode took 410 s of a 540 s warm generate | the decode default copied LTX-2's host decode before any HunyuanVideo measurement | `d6ffb9a`: the one-core vae launch is the default (warm e2e 239.1 s); `test_device_vae_is_the_default` |
+| 2 | TP4, 720x1280x129 | `difflet compile` had all 4 ranks at 100% CPU, no neuronx-cc running, for 30 minutes after the small graphs compiled; killed at 1806 s (`B/hunyuan_video/tp4_720p.killed_nki_trace/compile/run.log`) | py-spy (`.../compile_pyspy_rank1_blocking.txt`): nki tracing nkilib's `attention_cte` under torch-neuronx's `get_kernel_config` in fake-tensor mode, from `flash_attention_bounded`. That trace grows with the joint length (119,056 tokens) and is repeated in every process unless torch-neuronx's NKI trace cache keeps it; Difflet turns that cache off unless `DIFFLET_NKI_TRACE_CACHE` opts in, which HunyuanVideo 1.5's CLI does and 1.0's did not | `f4d9ac1`: the neuron launches opt in; `test_launches_opt_into_the_nki_trace_cache`. At 320x512x61 it also cuts the warm-up forward of every launch from 36.5 to 13.5 s (`B/hunyuan_video/tp4_tracecache/`), output bit-identical |
+| 3 | TP4, 720x1280x129 | after fix 2, the compile failed on every rank: `flash_attention_bounded(FakeTensor(size=(6, 119168, 128)))`: `BIR emission failed ... colz: body blob exceeds uint32 offset range` (`B/hunyuan_video/tp4_720p.blob_overflow/compile/run.log`) | one bounded-kernel call takes all of a rank's heads; its NKI body grows with heads x seqlen_q x seqlen_k and overflows a 32-bit offset (8.5e10 here; nkilib tests up to 4.35e10). At 3 heads (4.26e10) it still overflowed (`15b503f`, `tp4_720p.blob_overflow_3heads/`) | `15b503f` then `ce9d212`: calls above 16 x 36864^2 = 2.17e10 are split into equal head chunks (one head at 720p); unit tests in `test_neuron_attention_c3.py`. On the device the kernel then compiles, and the next limit is host memory (neuronx-cc OOM-killed at 115.2 GB, `tp4_720p.host_oom_1head/`): **open** |
+| 4 (not a bug) | TP4, 320x512x61 | after `ce9d212`, a generate on a root compiled at `f4d9ac1` ran two neuronx-cc compiles (the dual and single block graphs; warm-up forward 75 s instead of 13.5 s), output bit-identical (`B/hunyuan_video/tp4_tracecache/gen2_ce9d212/`) | first suspected: the head-split loop slicing the inputs even for one call. `195fc8c` restored the unsliced single call, and the next generate (`gen3_head`, at `195fc8c`) **still** compiled both block graphs (69.4 s warm-up), with NEFFs of a third size (7,785,177 / 6,994,062 bytes against 7,801,464 / 6,996,905 at `f4d9ac1` and 7,802,415 / 6,991,577 at `ce9d212`). The block NEFFs carry `source_line` debug metadata for the ops from `ops_impl/attention.py` (`debug_info/debug_info_hlo.dbg_*`), so *inference:* any edit that moves lines in that file changes the compiled graph's key, and every cache compiled before the edit compiles its blocks once more. That is torch-neuronx's cache keying, not a Difflet bug; `195fc8c`'s stated cause is refuted, and its code (the single call as it was before the split) is kept | none needed; one recompile per cache root after `15b503f`..`195fc8c` (about 60 s at TP4, 320x512x61) |
 
 ## How to inspect manually
 
@@ -293,10 +365,36 @@ missing PATH entry for `neuronx-cc`, is recorded under Environment.
 * **Re-run one cell:** `bash J/run.sh <name> --oracle J/hv1_dit_full_v20.pt --tp-degree 2
   --exec-mode compile --out-json J/<name>.json` from the worktree. Check first that no
   `torch.distributed.run` process is alive.
+* **A CLI run:** `B/hunyuan_video/<cell>/<run>/run.log` (the exact command on its `cmd:` line,
+  HEAD and dirty flag, the CLI's `load+warmup` lines, `/usr/bin/time -v`), `summary.json`
+  (`rc`, `wall_s`, `mp4` frame check, `sha256_mp4`, `sha256_latents`, per-process probe spans and
+  step deltas, `nmon_peak_gib`), `mid.png` (open it) and `out.mp4`.
+  `B/scripts/breakdown.py B/hunyuan_video/<cell>/<run>` prints the e2e breakdown and
+  `B/scripts/hvinfo.py <run dirs>` the load phases, neuronx-cc compiles and HBM.
+* **A 720p attempt:** `grep -v 'not tested' B/hunyuan_video/tp4_720p.<attempt>/compile/run.log |
+  grep -E 'BIR emission|F137|RuntimeError'`; the OOM kill is in
+  `B/hunyuan_video/tp4_720p.host_oom_1head/dmesg_oom.txt`.
 
-## Not covered by this stage
+## Not covered
 
-* **NOT MEASURED** in this stage (later Task 8 stages): end-to-end parity, the CLI runs, the
-  native vs AoT benchmark doc, the feature-catalog row and the full unit suite.
-* A cold compile time, because the NEFF cache was warm.
+* **NOT MEASURED** in Task 8: the CLI runs of TP2xCP2 ulysses and ring, and TP4+SP DiT parity.
+* **Full unit suite** (`pytest tests/unit` in the native venv at `195fc8c`, serial, 23.5 min;
+  `J/pytest_unit_full_195fc8c.log`): 3477 passed, 65 skipped, 138 failed, 27 errors. 25 errors
+  are collection errors of modules that import `neuronx_distributed` (the AoT stack, not
+  installed in the native venv); the other 2 are setup errors of
+  `test_neuron_flux_pipeline.py::test_matches_diffusers_flux_pipeline` with the same
+  order-dependent `ValueError` as the 6 failures below (that file passes alone at `195fc8c`,
+  4 passed). 132 of the 138 failures fail
+  the same way on an archive of `4c38a58` (`J/pytest_baseline_4c38a58_on_failed.log`), so they
+  predate this stage. The other 6 (`test_neuron_flux_dit.py::test_tp1_matches_diffusers`, one in
+  `test_neuron_flux_pipeline.py`, four in `test_neuron_flux_teacache.py`) pass when run alone at
+  `195fc8c` and fail only in full-suite order (`proj_out_attn` returns one value instead of two:
+  state left by an earlier test; not traced. The failing line is the Flux single block's row-parallel
+  `proj_out_attn`, which this stage did not change).
+  The tests this stage added or touched pass: `tests/unit/cli -k 'hunyuan or neuron or vae'` and
+  `test_neuron_cache.py` (409 passed after `f4d9ac1`), `test_neuron_attention_c3.py` (42 passed
+  at `195fc8c`). The two failures in `test_neuron_compile_c9.py` are among the 132: they expect
+  the HLO directory without the per-stack-version suffix that `059bff4` added.
+* A cold compile time in the DiT checks, because the NEFF cache was warm (the CLI cells measure
+  cold compiles, `benchmark/trn2/hunyuan_video_neuron.md`).
 * Full-depth parity at 61 frames (only timing ran at that shape). TP4+SP was not run.
