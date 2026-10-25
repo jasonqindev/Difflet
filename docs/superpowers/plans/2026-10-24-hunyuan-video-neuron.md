@@ -304,3 +304,29 @@ def test_teacache_cadence_skips_and_probe_mode_runs(tiny_pipeline): ...   # cade
 - [ ] **Step 6: Commit** — `docs(benchmark): HunyuanVideo on the neuron backend: parity per layout and native vs AoT on trn2`.
 
 Use the `difflet-device-verify` skill for Steps 2–4 (its evidence-doc format, disk and supervision rules, one-bug-one-commit protocol).
+
+---
+
+## Status and remaining work (2026-10-25)
+
+**Done.** Tasks 1–8 are committed on `feat/hunyuan-neuron` (pushed; HEAD `02e5cf6`), including amendments A1–A9, the audit's doc corrections, and three fixes found on the device: decode in the one-core vae launch by default (`d6ffb9a`), the NKI trace cache for HunyuanVideo launches (`f4d9ac1`), and the bounded-attention head split above attention_cte's tested size (`15b503f`, `ce9d212`). Evidence: `docs/verification/hunyuan-video-neuron-evidence.md`, `benchmark/trn2/hunyuan_video_neuron.md`, `benchmark/trn2/native_vs_aot_tp4_2026-10-25.md`; raw logs under `/home/ubuntu/bench-2026-10-25/` (the parity logs under the job tmp dir are not durable).
+
+Headline at TP4, 320×512×61, 50 steps: DiT step 808 ms native vs 814 ms AoT; peak HBM 13.0 vs 15.5 GiB per core; warm e2e about 222 s native vs 133 s AoT (the gap is the VAE). Qwen-Image TP4 native is 14% faster per step than AoT (21% with `--sp`); Wan2.1 TP4 native is 11% slower than two-core AoT.
+
+### Decisions for the plan owner
+
+- [ ] **D1 Full-depth parity gate.** Proposed: at full depth, gate on the mean ratio over at least 5 timesteps (≤ 1.15×) with a 1.25× cap on any single sample; keep the single-sample 1.15× gate for truncated depth and end to end. Under it the compiled DiT passes (mean 0.979×, max 1.190×). The t=900 / 20-valid-token excess (1.19×) is neuronx-cc's default `--enable-mixed-precision-accumulation` keeping the dual block's mid-block residual `h1` unrounded (evidence doc, "Compiler-level cause"); fixes were measured and not adopted (`--disable-mixed-precision-accumulation`: +39–61% at TP4 5×320×512; explicit `h1` rounding: +13.7% at TP2). Until decided, full-depth TP2/TP4 stay FAIL in the evidence doc.
+- [ ] **D2 Pull request.** Open a draft PR from `feat/hunyuan-neuron`, presumably into `feat/ltx2-neuron-rebased` (its base), or hold.
+
+### Follow-up work (not started; ordered by expected value)
+
+Each item: list a concrete plan and get approval before running anything on the device.
+
+- [ ] **F1 Close the warm e2e gap to AoT (222 s vs 133 s).** Nearly all of it is the decode: AoT's compiled bf16 VAE decodes in 17 s; native's eager fp32 vae launch takes about 118 s (launch, load, 74 s decode, 22 s frame write). Options: compile the decoder per block, use bf16 once F2 is fixed, speed up the frame write. Estimate: half a day to a day.
+- [ ] **F2 Eager bf16 VAE precision on the device.** 20.8 dB against fp32 with visible banding, while bf16 on the host is 55.9 dB (`benchmark/trn2/hunyuan_video_neuron.md`, VAE dtype). Suspects, unverified: GroupNorm or Conv3d in bf16 on the device. Prerequisite for the bf16 part of F1. Estimate: 2–4 h.
+- [ ] **F3 The compile-mode vae launch lingers 927 s before exiting** (generate-mode launches exit in 3–4 s); it adds about 15 min to a cold compile. Estimate: 1–2 h.
+- [ ] **F4 720×1280×129.** Blocked: after the head split the attention kernel compiles, but neuronx-cc compiling the block graph is OOM-killed at 109.8 GiB of the host's 124.8 GiB. Untried: `-O1`, attention in its own graph, ring CP, fewer frames, a host with more RAM. Estimate: half a day, no guarantee.
+- [ ] **F5 Adaptive TeaCache for HunyuanVideo on neuron.** No 320×512×61 calibration exists on the host; only the probe-free cadence mode was measured (cadence 2: 20/50 steps skipped, denoise 40.4 → 24.3 s, cos 0.99984). The probe uses the absolute-L2 metric (A3). Estimate: 2–3 h.
+- [ ] **F6 Wan2.1 native vs two-core AoT step gap (+11%).** Pre-existing, unrelated to HunyuanVideo; needs a profile first.
+- [ ] **F7 Six Flux neuron unit tests fail only in full-suite order** (they pass alone; two setup errors likewise). Unrelated to this branch's changes. Estimate: 1 h.
+- [ ] **F8 Units in older trn2 docs.** `neuron_feature_matrix.md`, `neuron_final.md`, `ltx_2_neuron.md` still say "124 GB RAM" for this host (124.8 GiB). Cosmetic, 10 min.
