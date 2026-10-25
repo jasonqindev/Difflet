@@ -213,6 +213,35 @@ With the workaround the device's bf16 result equals the host's to within 1e-7 of
 - **bf16 decodes 2.1x faster than fp32** in the same process (20.1-20.6 s vs 43.2 s); the fp32 statistics cost about 10% against the inaccurate bf16 kernel (18.3-18.8 s before the fix).
 - The CLI still builds the decoder in fp32 (amendment A6). A bf16 default goes through the plan's default-change rule.
 
+### F1a: a compiled decoder (2026-10-26, `1c10dfc`)
+
+`NeuronHunyuanVideoVaeDecoderApplication(exec_mode="compile")` (opt-in; the CLI still runs the eager decoder) with the fixed-size tiling (`tiling="fixed"`, the default when compiled): `models/hunyuan_video/vae/tiling.py` walks diffusers' windows and blends them as diffusers does, on the host, but pads every window to the full 5x32x32 latent tile, and `HunyuanVideoVAEValidTileDecoder` decodes the padded tile exactly as the decoder decodes the unpadded window (GroupNorm statistics, convolution borders and attention keys confined to the window). The decoder is compiled region by region (26 graphs). Same latents and reference as the F2 table; one core; `B26/f1a/scripts/vaebench2.py` with `vae_repeat2.py`; the second decode of a process is the warm number.
+
+| decode | first decode in a fresh process, warm root (s) | later decodes, same process (s) | cold compile: warm-up decode on a fresh root (s), NEFFs | peak HBM alloc / neuron-monitor (GiB) | largest host process, peak RSS (GiB) | vs fp32 host decode | log |
+|---|---:|---:|---:|---:|---:|---|---|
+| compiled, fixed tiles, **bf16** | **22.3** | **15.95-15.97** | **134.9**, 26 | 3.74 / 5.99 | 3.0 | rel-L1 3.73e-3, PSNR **56.07 dB** | `B26/f1a/fixed_bf16_v2_cold/`, `fixed_bf16_v2_warm/` |
+| compiled, fixed tiles, fp32 | 61.4 | 49.7 | 335.0, 26 | 7.45 / 12.02 | 8.8 | rel-L1 2.5e-7, PSNR 139.3 dB | `B26/f1a/fixed_fp32_v2_cold/`, `fixed_fp32_v2_warm/` |
+| eager, diffusers' tiles, bf16 (F2, `2e04372`) | 55.0 | 20.1-20.6 | 357.0 (first decode on the eager bf16 root after `2e04372`), 207 new | 6.80 / 13.84 | | 55.9 dB | `B26/f2/f2_neuron_bf16_gnfp32*/` |
+| eager, diffusers' tiles, fp32 (the CLI's decoder) | 95.0-100.4 | 40.7-43.2 | 1752.3, about 3,751 | 11.53 / 20.89 | | 136.7 dB | `B/hunyuan_video/vae/neuron_fp32*/`, `B26/f2/f2_neuron_fp32_gnfp32/` |
+| AoT, compiled bf16 tile decoder (*reused*) | 17.1 in the generate stage | | | | | not compared (other latents) | `B/hunyuan_video/aot_tp4/gen1` |
+
+- **The compiled bf16 decoder decodes in 16.0 s, 22.3 s first in a fresh process** (eager bf16: 20.1-20.6 / 55.0 s; the CLI's eager fp32: 40.7-43.2 / 95-100 s; AoT's compiled bf16 decoder: 17.1 s), at 56.07 dB against the fp32 host decode, and compiles cold in 135 s into 26 NEFFs instead of about 3,751 per-op NEFFs in 29 minutes. Every decode is bit-identical across repeats and processes (`torch.equal`, cold vs warm root). The host part (window padding, crops, blends) takes 0.3 s of the 16 s (`B26/f1a/scripts/host_overhead.py`); the rest is the device: about 0.5 s per tile, 30 tiles (diffusers' 36 windows less the 6 one-frame windows whose only frame it drops).
+- **fp32 compiled is exact** (139.3 dB, rel-L1 2.5e-7, slightly closer to the host than eager's 3.5e-7) and faster than eager on a fresh process's first decode (61.4 vs 95-100 s), but slower in a resident process (49.7 vs 40.7-43.2 s). *Inference:* fp32 matmuls run at a quarter of the bf16 rate, and the normalization regions are not faster than eager's GroupNorm.
+- **The committed code was checked on the device:** at `1c10dfc` (docstrings changed after the runs above, which moves the graphs' source lines, so all 26 graphs recompiled: first decode 143.7 s including the compile) the decode is bit-identical to the run above, 15.95 s, 56.07 dB (`B26/f1a/fixed_bf16_commit_check/`).
+
+What it took to compile (each found on the device, each worked around in `1c10dfc`; logs under `B26/f1a/`):
+
+| attempt | outcome | log |
+|---|---|---|
+| the whole decoder as one region at the 5x32x32 tile | neuronx-cc refuses it: `NCC_EVRF009` "Size of total input and output tensors exceeds HBM limit", 102 GB needed with the valid-extent decoder, 37 GB with the plain decoder (`HunyuanVideoVAEDecoderModel`), against 24 GB, in fp32 | `fixed_fp32_cold/`, `probe1/plain_full*.log` |
+| one region per resnet, attention, upsampler, `torch.where` masks | `NCC_ILSA902` "LegalizeSundaAccess ... copy_tensorselect" (internal error) in two graphs; masks are now multiplied in | `fixed_fp32_cold2/` |
+| the same with multiplied masks | `NCC_ITRF901` "TritiumFusion assertion error: Unexpected remat axes" in the up blocks 1 and 2 upsamplers (the two that double the frames), with either form of the time repeat; their convolution is now a region of its own | `fixed_fp32_cold3/`, `dbg3/`, `fixed_fp32_r2a/` |
+| fused resnets (norm, conv, norm, conv in one graph), 15 graphs | compiles (bf16 cold 689.9 s, largest host process 17.7 GiB; fp32 up to 37.9 GiB) but decodes in 86.6 s bf16 / 109.2 s fp32: a 128-channel resnet at 17x256x256 takes 0.68 s in bf16 while a lone 256-channel convolution there takes 0.04 s (`region_times_bf16.log`) | `fixed_bf16_cold/`, `fixed_fp32_r2b/` |
+| resnets split into norm / conv / norm / conv + residual (26 graphs, the committed form) | the same resnet in 0.08 s (0.018 + 0.023 + 0.018 + 0.023 s); the table above | `region_times_bf16_v2.log` |
+
+- **Padding the edge windows without confining the decoder to them (what the AoT path's `_decode_tile` does) is not accurate enough:** the whole fp32 decode on the host with that tiling is at 42.5 dB (rel-L1 1.3e-2, max abs 0.58) against diffusers' tiled decode, and single edge tiles at 40.8-48.8 dB (`B26/f1a/aot_semantics_full.log`, `pad_tile_err.log`), under the 60 dB fp32 gate; hence the valid-extent decoder.
+- **Control: `torch.compile` of diffusers' decoder in diffusers' tiling loop** (`tiling="diffusers"`, compiled block by block: resnets, attention, upsamplers; 12 window shapes): not completed. In bf16 on a fresh root it compiled 39 NEFFs in 32 minutes, then neuronx-cc was killed for lack of host memory (`F137`; the largest process of the run peaked at 118.8 GiB RSS, of the host's 124.8 GiB) while compiling the fused resnet graphs four at a time (`B26/f1a/diffusers_bf16_cold/`). Its resnets are the fused form that decodes 8x slower per resnet above, at 12 window shapes instead of one, so it was not pursued further.
+
 ## Extra cells (n=2)
 
 | cell | DiT step median / p10 / p90 (ms) | e2e warm (s) | other | log |
@@ -235,7 +264,7 @@ With the workaround the device's bf16 result equals the host's to within 1e-7 of
 
 ## Open issues
 
-1. **The vae launch's cold compile is 29 minutes** (3,751 eager per-op NEFFs) and a fresh vae process's first decode takes 95 s against 41 s for later decodes in the same process (*inference:* the difference is loading those NEFFs). Options, not tried: compile the decoder's tile function per block as the DiT is (fewer, larger NEFFs), or keep the decoder resident across requests (serving).
+1. **The vae launch's cold compile is 29 minutes** (3,751 eager per-op NEFFs) and a fresh vae process's first decode takes 95 s against 41 s for later decodes in the same process (*inference:* the difference is loading those NEFFs). **Addressed, opt-in, by `1c10dfc`** ("F1a: a compiled decoder"): the compiled bf16 decoder compiles in 135 s into 26 NEFFs and decodes in 22.3 s first in a process, 16.0 s after; the CLI does not use it yet.
 2. **After the compile-mode warm-up decode, the vae launch took 927 s to exit** (the rank's last Python `atexit` handler ran at 1949.3 s; torchrun returned at 2876.6 s; `B/hunyuan_video/tp4_devvae/compile/summary.json`). Generate-mode vae launches exit 3–4 s after the mp4 is written. *Inference:* process teardown after a compile of 3,751 NEFFs (runtime unload or compile-cache flush); not investigated. It adds 15 minutes to the cold compile above.
 3. **Fixed (`2e04372`): the eager bf16 decoder on a NeuronCore was inaccurate** (20.8 dB against the fp32 decode, visible banding): the device's bf16 GroupNorm loses precision as the group grows. With its statistics in fp32 the device's bf16 decode is at 55.9 dB, as on the host ("F2: bf16 VAE precision on the device"). The CLI still decodes in fp32.
 4. **The warm-up forward of every generate launch** was 36.5 s at tp4 with all NEFFs cached (TP2: 63.5 s, TP2xCP2: 36.8 s), about as long as the 50-step denoise. **Mostly fixed by `f4d9ac1`** (the NKI trace cache): 13.5 s at tp4. The remaining 13.5 s was not broken down.
