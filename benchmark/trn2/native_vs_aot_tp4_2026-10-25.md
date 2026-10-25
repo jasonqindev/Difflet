@@ -1,7 +1,7 @@
 # Native vs AoT at TP4 on trn2.3xlarge, re-measured 2026-10-25
 
 **Backends:** neuron (TorchNeuron: torchrun, one process per NeuronCore, per-block `torch.compile`; "native") and the Trainium AoT backend (NxD; "AoT"), the same `difflet` CLI on the same host  
-**Device:** trn2.3xlarge: 1 device, 4 NeuronCores (LNC=2, 24 GiB HBM per core), 12 vCPU, 124 GB RAM, one EBS root volume  
+**Device:** trn2.3xlarge: 1 device, 4 NeuronCores (LNC=2, 24 GiB HBM per core), 12 vCPU, 124.8 GiB RAM, one EBS root volume  
 **Code under test:** branch `feat/hunyuan-neuron`, clean tree in every run: Qwen-Image at `4f6e1de` (`head: 4f6e1de dirty=0` in each `run.log`), Wan2.1 at `8b2408c` (`head: 8b2408c dirty=0` in all 22 Wan `run.log`s; `8b2408c` only adds the Qwen-Image section of this doc)  
 **Raw evidence:** kept out of git, under `/home/ubuntu/bench-2026-10-25/` on the benchmark host (`B` below). Each run has its own directory `B/<model>/<cell>/<run>/` with:
 - `run.log`: the CLI output and `/usr/bin/time -v`;
@@ -16,7 +16,7 @@ Every number below comes from a run made for this report and names its run direc
 
 ## Summary: three models at TP4, native vs AoT
 
-All three were measured on this host on 2026-10-25 with the same method (cold compile on a fresh root, cold e2e with the page cache dropped, gen0 discarded, n=3 timed warm runs). The HunyuanVideo row is *reused* from `hunyuan_video_neuron.md` (its "TP4: native vs AoT" table); the other two are this report's sections below. Native vs AoT is (native − AoT) / AoT: negative means native is faster or smaller.
+All three were measured on this host on 2026-10-25 with the same method (cold compile on a fresh root, cold e2e with the page cache dropped, gen0 discarded, n=3 timed warm runs, except HunyuanVideo's AoT cell with n=2: 133.0 and 132.9 s). The HunyuanVideo row is *reused* from `hunyuan_video_neuron.md` (its "TP4: native vs AoT" table); the other two are this report's sections below. Native vs AoT is (native − AoT) / AoT: negative means native is faster or smaller.
 
 | model, workload | DiT step median: native / AoT | compile cold: native / AoT | e2e warm: native / AoT | e2e cold: native / AoT | peak HBM per DiT core (neuron-monitor): native / AoT |
 |---|---|---|---|---|---|

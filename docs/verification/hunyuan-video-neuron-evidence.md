@@ -1,16 +1,20 @@
 # HunyuanVideo 1.0 on the neuron backend: on-device evidence (DiT parity per layout, end to end, CLI)
 
 Campaign: 2026-10-24, device runs 21:31-22:35 UTC. Host: `trn2.3xlarge`, 1 Neuron device, 4 logical
-NeuronCores (logical config 2), 24 GiB HBM per logical core, 12 vCPUs, 124 GB RAM. Branch
-`feat/hunyuan-neuron` at `88c8e48`; no code changed during the campaign.
+NeuronCores (logical config 2), 24 GiB HBM per logical core, 12 vCPUs, 124.8 GiB RAM. Branch
+`feat/hunyuan-neuron` at `88c8e48`; no code changed during stage 2.
 
 This doc covers Task 8 of `docs/superpowers/plans/2026-10-24-hunyuan-video-neuron.md`. Stage 2
 checks DiT parity on the device at every layout, at truncated depth and at full depth, and runs the
 compiled mask-bounds regression (sections Summary to Bug ledger). Stage 3, the end-to-end parity
 check, ran right after it (2026-10-24 22:41-23:02 UTC, code unchanged: `b38f3bc` only added this
-doc). The CLI runs (stage 4) ran on 2026-10-25 at `d6ffb9a` (TP4) and `4c38a58` (TP2, TP2xCP2,
-720p); neither commit after `d6ffb9a` touched code. See "End to end" and "CLI runs" below; the
-timings are reported in `benchmark/trn2/hunyuan_video_neuron.md`. A compiler-level deep dive into
+doc). The CLI runs (stage 4) ran on 2026-10-25 at the commits that
+`benchmark/trn2/hunyuan_video_neuron.md`'s header lists: the TP4 row is `tp4_devvae`, run at
+`b38f3bc` with an explicit `--device-vae` (the placement `d6ffb9a` then made the default); TP2,
+TP2xCP2 and the first 720p attempt ran at `4c38a58` (no code change since `d6ffb9a`); the other
+three 720p attempts ran at `f4d9ac1`, `15b503f` and `ce9d212`, and the trace-cache runs at
+`f4d9ac1`, `ce9d212` and `195fc8c`, each of which changes code (the fixes in the bug ledger). See
+"End to end" and "CLI runs" below; the timings are reported in that benchmark doc. A compiler-level deep dive into
 the one open parity result ran on 2026-10-25 14:28-15:25 UTC at `eef92d6`, with no code change
 (section "Compiler-level cause of the full-depth t=900 result"; its files are under `J/s3/`).
 
@@ -45,8 +49,8 @@ missed the gate) · **NOT MEASURED** (not run in this stage).
   intermediate stream `h1 = h + attn*gate_msa` to bf16 before adding `ff*gate_mlp`: one rounding
   per block instead of diffusers' two. A graph break anywhere between the two updates gives
   1.000-1.002x, a break before the first update does not (1.186-1.188x); a host CPU emulation of
-  the single rounding reproduces the device ratio at every timestep (1.198x at t=900, device
-  1.190x); rounding `h1` explicitly inside the compiled graph gives 0.966-1.085x on all 8 samples.
+  the single rounding reproduces the device's pattern and its t=900 excess (1.198x at t=900,
+  device 1.190x; close at 5 of 7 timesteps, not at t=850 or t=300); rounding `h1` explicitly inside the compiled graph gives 0.966-1.085x on all 8 samples.
   This rounding is **not less accurate**: over the 7 timesteps the compiled DiT's mean rel-L1 is
   0.973x the control's, against 1.027x for eager. The t=900 sample fails because the paths that
   round like diffusers (control, eager) share a lucky low error there (2.515e-03, the lowest of
@@ -63,7 +67,7 @@ missed the gate) · **NOT MEASURED** (not run in this stage).
   is not needed.**
 * **Time per full-depth forward (compiled, median of 2x5).** At 5x320x512: TP2 207.9 ms, TP4
   265.0 ms, TP2+SP 207.3 ms, TP2xCP2 gather_kv 649.7 ms, ring 672.7 ms, ulysses 1148.3 ms, and TP2
-  eager 1802.1 ms. At 61x320x512: **TP2 1460.8 ms, TP4 805.6 ms.**
+  eager 1802.1 ms (median of 2, `--iters 2`). At 61x320x512: **TP2 1460.8 ms, TP4 805.6 ms.**
 * **Compiled mask bounds: 72/72 counts exact on a NeuronCore.** The checks cover the key bounds,
   ulysses `key_valid_len` and ring `text_valid_len`, at 1,536, 10,496 and 20,096 keys.
 * **End to end (stage 3), 3 steps at full depth: PASS** at TP2 (1.003x the control), with our
@@ -76,7 +80,7 @@ missed the gate) · **NOT MEASURED** (not run in this stage).
   (`f4d9ac1`). A third (`15b503f`, `ce9d212`) splits the bounded attention kernel over heads
   past a size whose NKI compile overflows. See the bug ledger.
 * **720x1280x129 at TP4: BLOCKED.** After those fixes the block graph's neuronx-cc compile needs
-  more than the host's 124 GB and is OOM-killed; no forward ran (see "CLI runs").
+  more than the host's 124.8 GiB and is OOM-killed; no forward ran (see "CLI runs").
 
 | item | value |
 |---|---|
@@ -140,7 +144,8 @@ Columns: ours and the control are rel-L1 against fp32 diffusers. "ratio" is ours
 the gate is at most 1.15x. `err_cos` is the cosine between our error and the control's error.
 "load+warmup (warm-up fwd)" is seconds to build, load the checkpoint, compile and run the warm-up
 forward. "compiles" is torch-neuronx's `TotalCompilations` counter. ms/fwd is the median device
-forward over 2 rounds of 5 (`--iters 5`). Peak HBM is the maximum over ranks. Logs are in `J/`.
+forward over 2 rounds of 5 (`--iters 5`), except full-depth TP2 eager, timed with `--iters 2`
+(median of 2 samples, one round). Peak HBM is the maximum over ranks. Logs are in `J/`.
 Every row also passed: checkpoint (0 missing, 0 unexpected), fallbacks (none in warm-up, forwards
 or benchmark), unwarmed shapes (none), identical ranks (output sha256 equal on every rank),
 compiled blocks (all, compile mode) or no compiled blocks (eager), and finite output.
@@ -259,7 +264,8 @@ kernel's NKI trace ran for 30+ minutes in every process, fixed by `f4d9ac1`; (2)
 kernel's NKI compile failed, `BIR emission failed: colz: body blob exceeds uint32 offset range`,
 at 6 heads x 119,168^2 per call; (3) the same at 3 heads (`15b503f`); (4) at one head per call
 (`ce9d212`) the kernel compiles, and neuronx-cc compiling the block graph was OOM-killed at
-115.2 GB of the host's 124 GB (`[F137]`, exit code 70). The DiT weights load (11.83 GiB per
+109.8 GiB resident (dmesg `anon-rss:115166160kB`) of the host's 124.8 GiB (`[F137]`, exit code
+70). The DiT weights load (11.83 GiB per
 core); the activation HBM at this shape was never reached.
 
 The plan's Step 4 names TP2xCP2 ulysses; the CP cell ran gather_kv instead because it was the
@@ -419,7 +425,7 @@ It stays when only the attention side is split (p1, p2). With p4, p5 or p6, `nor
 then rounds its residual stream once, `bf16(h + attn*g1 + ff*g2)`, where diffusers and eager
 round twice.
 
-### 3. Host emulation reproduces the device, timestep by timestep
+### 3. Host emulation reproduces the device's pattern and its t=900 excess
 
 `cpu_acc.py` runs our port in bf16 on the host CPU (tp1, eager), with the dual block's residual
 chain rounded as `acc_patch.py` selects (`J/s3/cpu_acc.log`). Mode A is
@@ -435,7 +441,9 @@ Mode B also keeps the products in fp32. Mode C also gives norm2 the fp32 `h1`.
 | device, compiled (stage 2) | 0.838x | **1.190x** | 1.054x | 0.940x | 0.891x | 0.943x | 0.998x |
 
 Dropping the one `h1` rounding is enough to move the host from about 1.00x to the device's
-pattern, including the 1.19-1.20x at t=900. Products and norm2 precision barely matter (modes B
+pattern, including the 1.19-1.20x at t=900. Mode A is within 0.016 of the device at t=950, 900,
+700, 500 and 100, but not at t=850 (0.969x host, 1.054x device) or t=300 (0.979x against
+0.943x). Products and norm2 precision barely matter (modes B
 and C). This is the off-device pin of the mechanism. A CPU unit test was not added: no code
 changed, and the emulation needs the 25.6 GB checkpoint.
 
@@ -470,6 +478,11 @@ at `88c8e48`):
 | `--disable-mixed-precision-accumulation` | 205.4 ms | **368.7 ms** (twice: `nomacc_tp4_full_v20{,_r2}`; parity 1.081x) | 1453.8 ms, 16.18 GiB | 803.9 ms, 11.67 GiB |
 | `h1` rounded explicitly | 235.1 ms (+13.7%) | NOT MEASURED | NOT MEASURED | NOT MEASURED |
 
+The default TP4 5x320x512 forward is 229.4 ms here (`eef92d6`, spread 1.0%) but 265.0 ms in
+stage 2 (`dit_full_tp4_compile`, `88c8e48`, spread 8.7%); `ops_impl/attention.py` changed between
+the two commits. Against the same-day 229.4 ms the flag costs +61% at TP4; against stage 2's
+265.0 ms it would be +39%. TP2 agrees across the two (206.8 against 207.9 ms).
+
 The flag also recompiles every graph once (its value is part of the NEFF cache key) and is
 process-global (`NEURON_CC_FLAGS`). torch-neuronx has no per-graph compiler option.
 
@@ -502,7 +515,8 @@ and more accurate than with the flag off.
   host port 1.005x) share that luck.
 * **No product change.** The two fixes that pass every sample both cost something, and neither
   improves accuracy against fp32:
-  * The flag is +61% at TP4 5x320x512 and global to the process. It is neutral at the default
+  * The flag is +61% at TP4 5x320x512 against the same-day default (229.4 ms at `eef92d6`; +39%
+    against stage 2's 265.0 ms at `88c8e48`) and global to the process. It is neutral at the default
     61-frame shape and at TP2.
   * Explicit rounding is +13.7% at TP2 and only buys back the correlation with diffusers.
 
@@ -528,8 +542,8 @@ Environment. The CLI runs found three bugs, each fixed in its own commit, and on
 | # | layout | symptom | root cause | fix |
 |---|---|---|---|---|
 | 1 | TP4, 320x512x61 | the default host decode took 410 s of a 540 s warm generate | the decode default copied LTX-2's host decode before any HunyuanVideo measurement | `d6ffb9a`: the one-core vae launch is the default (warm e2e 239.1 s); `test_device_vae_is_the_default` |
-| 2 | TP4, 720x1280x129 | `difflet compile` had all 4 ranks at 100% CPU, no neuronx-cc running, for 30 minutes after the small graphs compiled; killed at 1806 s (`B/hunyuan_video/tp4_720p.killed_nki_trace/compile/run.log`) | py-spy (`.../compile_pyspy_rank1_blocking.txt`): nki tracing nkilib's `attention_cte` under torch-neuronx's `get_kernel_config` in fake-tensor mode, from `flash_attention_bounded`. That trace grows with the joint length (119,056 tokens) and is repeated in every process unless torch-neuronx's NKI trace cache keeps it; Difflet turns that cache off unless `DIFFLET_NKI_TRACE_CACHE` opts in, which HunyuanVideo 1.5's CLI does and 1.0's did not | `f4d9ac1`: the neuron launches opt in; `test_launches_opt_into_the_nki_trace_cache`. At 320x512x61 it also cuts the warm-up forward of every launch from 36.5 to 13.5 s (`B/hunyuan_video/tp4_tracecache/`), output bit-identical |
-| 3 | TP4, 720x1280x129 | after fix 2, the compile failed on every rank: `flash_attention_bounded(FakeTensor(size=(6, 119168, 128)))`: `BIR emission failed ... colz: body blob exceeds uint32 offset range` (`B/hunyuan_video/tp4_720p.blob_overflow/compile/run.log`) | one bounded-kernel call takes all of a rank's heads; its NKI body grows with heads x seqlen_q x seqlen_k and overflows a 32-bit offset (8.5e10 here; nkilib tests up to 4.35e10). At 3 heads (4.26e10) it still overflowed (`15b503f`, `tp4_720p.blob_overflow_3heads/`) | `15b503f` then `ce9d212`: calls above 16 x 36864^2 = 2.17e10 are split into equal head chunks (one head at 720p); unit tests in `test_neuron_attention_c3.py`. On the device the kernel then compiles, and the next limit is host memory (neuronx-cc OOM-killed at 115.2 GB, `tp4_720p.host_oom_1head/`): **open** |
+| 2 | TP4, 720x1280x129 | `difflet compile` had all 4 ranks at 100% CPU, no neuronx-cc running, for 30 minutes after the small graphs compiled; killed at 1806 s (`B/hunyuan_video/tp4_720p.killed_nki_trace/compile/run.log`) | py-spy (`.../compile_pyspy_rank1_blocking.txt`): nki tracing nkilib's `attention_cte` under torch-neuronx's `get_kernel_config` in fake-tensor mode, from `flash_attention_bounded`. That trace grows with the joint length (119,056 tokens) and is repeated in every process unless torch-neuronx's NKI trace cache keeps it; Difflet turns that cache off unless `DIFFLET_NKI_TRACE_CACHE` opts in, which HunyuanVideo 1.5's CLI does and 1.0's did not | `f4d9ac1`: the neuron launches opt in; `test_launches_opt_into_the_nki_trace_cache`. At 320x512x61 it also cuts the warm-up forward of every launch from 36.5 s (`tp4_teacache2/gen1`, `d6ffb9a`, same root as `tp4_devvae`) to 13.5 s (`B/hunyuan_video/tp4_tracecache/`), output bit-identical |
+| 3 | TP4, 720x1280x129 | after fix 2, the compile failed on every rank: `flash_attention_bounded(FakeTensor(size=(6, 119168, 128)))`: `BIR emission failed ... colz: body blob exceeds uint32 offset range` (`B/hunyuan_video/tp4_720p.blob_overflow/compile/run.log`) | one bounded-kernel call takes all of a rank's heads; its NKI body grows with heads x seqlen_q x seqlen_k and overflows a 32-bit offset (8.5e10 here; nkilib tests up to 4.35e10). At 3 heads (4.26e10) it still overflowed (`15b503f`, `tp4_720p.blob_overflow_3heads/`) | `15b503f` then `ce9d212`: calls above 16 x 36864^2 = 2.17e10 are split into equal head chunks (one head at 720p); unit tests in `test_neuron_attention_c3.py`. On the device the kernel then compiles, and the next limit is host memory (neuronx-cc OOM-killed at 109.8 GiB resident, `tp4_720p.host_oom_1head/`): **open** |
 | 4 (not a bug) | TP4, 320x512x61 | after `ce9d212`, a generate on a root compiled at `f4d9ac1` ran two neuronx-cc compiles (the dual and single block graphs; warm-up forward 75 s instead of 13.5 s), output bit-identical (`B/hunyuan_video/tp4_tracecache/gen2_ce9d212/`) | first suspected: the head-split loop slicing the inputs even for one call. `195fc8c` restored the unsliced single call, and the next generate (`gen3_head`, at `195fc8c`) **still** compiled both block graphs (69.4 s warm-up), with NEFFs of a third size (7,785,177 / 6,994,062 bytes against 7,801,464 / 6,996,905 at `f4d9ac1` and 7,802,415 / 6,991,577 at `ce9d212`). The block NEFFs carry `source_line` debug metadata for the ops from `ops_impl/attention.py` (`debug_info/debug_info_hlo.dbg_*`), so *inference:* any edit that moves lines in that file changes the compiled graph's key, and every cache compiled before the edit compiles its blocks once more. That is torch-neuronx's cache keying, not a Difflet bug; `195fc8c`'s stated cause is refuted, and its code (the single call as it was before the split) is kept | none needed; one recompile per cache root after `15b503f`..`195fc8c` (about 60 s at TP4, 320x512x61) |
 
 ## How to inspect manually

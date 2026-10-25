@@ -44,7 +44,7 @@ the 23.9 GiB DiT does not fit one core). Evidence: `docs/verification/hunyuan-vi
 | TP2 / TP4 | PASS (CLI 320×512×61, 50 steps: 1461.8 / 808.3 ms per step, e2e 300.9 / 239.1 s before `f4d9ac1`; TP4 222.5 s after) |
 | CP gather_kv (TP2×CP2) | PASS (CLI: 905.1 ms per step, e2e 250.0 s; e2e parity 1.021x) |
 | CP ulysses / ring (TP2×CP2) | PASS at DiT level (truncated-depth parity, compiled mask bounds); CLI NOT MEASURED. Ring takes the valid-text count as `text_valid_len` |
-| SP | PASS (TP2+SP DiT parity; TP4 `--sp` CLI: no gain, 809.3 ms) |
+| SP | PASS (TP2+SP DiT parity at truncated depth; at full depth on the t=900 oracle 1.190x, like every compiled layout; TP4 `--sp` CLI: no gain, 809.3 ms) |
 | CFG-parallel | N/A (guidance-distilled; refused) |
 | DP / serving / multi-shape | NOT MEASURED (out of the plan's scope) |
 | TeaCache fixed cadence | PASS (`--teacache-cadence 2`: 20/50 steps skipped, latents cos 0.99984) |
@@ -52,7 +52,7 @@ the 23.9 GiB DiT does not fit one core). Evidence: `docs/verification/hunyuan-vi
 | DiT parity, full depth | LIMIT: compiled layouts 1.19x the bf16 control on the t=900 / 20-token input (gate 1.15x), 0.84–1.05x on 7 other inputs; eager 1.006x; gate decision pending |
 | e2e parity (3 steps, latents) | PASS (TP2 1.003x, TP2×CP2 gather_kv 1.021x; host encoder equal to diffusers') |
 | Device VAE | PASS fp32 (default; 3.5e-7 vs host fp32); bf16 BLOCKED by accuracy (20.8 dB, banding) |
-| 720×1280×129 (TP4) | BLOCKED on trn2.3xlarge: after `f4d9ac1`/`15b503f`/`ce9d212` the block graph's neuronx-cc compile is OOM-killed at 115 GB host RAM; no forward ran |
+| 720×1280×129 (TP4) | BLOCKED on trn2.3xlarge: after `f4d9ac1`/`15b503f`/`ce9d212` the block graph's neuronx-cc compile is OOM-killed at 109.8 GiB of the host's 124.8 GiB RAM; no forward ran |
 
 Gotchas: a `pytest` process in the native venv held `/dev/neuron0` in this campaign (*inference:*
 importing torch-neuronx opens it), so never run unit tests while a device job runs or is about to
