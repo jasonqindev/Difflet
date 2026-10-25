@@ -7,6 +7,17 @@ accumulates the statistics in fp32: over HunyuanVideo 1.5's 54 blocks the drift 
 brings the model to 0.92x. ``F.layer_norm`` is wrapped (``nn.LayerNorm`` calls it); other dtypes
 and devices run unchanged.
 
+GroupNorm in bf16. The device's bf16 GroupNorm loses accuracy as the group grows, while the CPU's
+bf16 kernel stays at bf16 rounding (2e-3 to 4e-3 rel-L1 against fp32 at every size). On one tile
+of HunyuanVideo's VAE decoder, each GroupNorm run alone on the fp32 input cast to bf16 was off by
+6e-3 to 2e-2 rel-L1 at 81,920 elements per group, 3e-2 to 4e-2 at 327,680, 0.2 to 0.38 at 1.2M to
+2.4M, and 1.3 to 2.1 at 4.5M to 8.9M; the decoder's other ops (Conv3d, SiLU, the attention's
+Linear layers, the upsampling) matched the CPU's bf16 error. The whole bf16 decode came out at
+20.8 dB PSNR against the fp32 decode (55.9 dB in bf16 on the host); in fp32 the device's decode
+matches the host's to 3.5e-7, hence statistics in fp32 for bf16 inputs. ``F.group_norm`` is
+wrapped as ``F.layer_norm`` is (``nn.GroupNorm`` calls it); other dtypes and devices run
+unchanged. No DiT on this backend uses GroupNorm.
+
 Boolean bitwise ops on non-contiguous operands. Eager ``bitwise_and`` on ``bool`` neuron tensors
 returns wrong values when an operand is a non-contiguous view, at sizes such as 256 x 256 (a
 64 x 64 case was correct; ``uint8`` and ``int64`` are correct; ``.contiguous()`` on the strided
@@ -61,10 +72,30 @@ def install_layer_norm_fp32() -> None:
     F.layer_norm = layer_norm
 
 
+def install_group_norm_fp32() -> None:
+    """Wrap ``torch.nn.functional.group_norm`` (idempotent)."""
+    import torch.nn.functional as F
+
+    if ("F", "group_norm") in _originals:
+        return
+    original = F.group_norm
+
+    def group_norm(input, num_groups, weight=None, bias=None, eps=1e-5):
+        if _on_neuron(input) and input.dtype == torch.bfloat16:
+            return original(input.float(), num_groups,
+                            None if weight is None else weight.float(),
+                            None if bias is None else bias.float(), eps).to(input.dtype)
+        return original(input, num_groups, weight, bias, eps)
+
+    _originals[("F", "group_norm")] = original
+    F.group_norm = group_norm
+
+
 def install_neuron_workarounds() -> None:
     """Every workaround (idempotent): what prepare_runtime installs."""
     install_bool_bitwise_guard()
     install_layer_norm_fp32()
+    install_group_norm_fp32()
 
 
 def install_bool_bitwise_guard() -> None:
@@ -105,5 +136,6 @@ def uninstall_bool_bitwise_guard() -> None:
 
 uninstall_neuron_workarounds = uninstall_bool_bitwise_guard
 
-__all__ = ["install_bool_bitwise_guard", "install_layer_norm_fp32", "install_neuron_workarounds",
-           "uninstall_bool_bitwise_guard", "uninstall_neuron_workarounds"]
+__all__ = ["install_bool_bitwise_guard", "install_group_norm_fp32", "install_layer_norm_fp32",
+           "install_neuron_workarounds", "uninstall_bool_bitwise_guard",
+           "uninstall_neuron_workarounds"]
