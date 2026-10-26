@@ -213,3 +213,5 @@ The user asked whether reading the native weight store belongs to warm rather th
 - **B (stricter for native):** native cold runs with `DIFFLET_NEURON_WEIGHT_STORE=0` (reads the original checkpoint); AoT unchanged.
 
 Only Wan2.1 (DiT: store 217 s vs fp32 checkpoint 435 s) and LTX-2 (Gemma-3: store 178.5 s vs 358 s) differ; HunyuanVideo and Qwen-Image native write no store (bf16 checkpoints, "no gain"). Recommendation: measure both for Wan2.1 and LTX-2 native (A as the headline, B as a supplement, about +10 min each), unless the user wants B only.
+
+**Decided by the user 2026-10-26: measure both.** For Wan2.1 and LTX-2 native, cold e2e is measured under A (weight store in use; the headline, symmetric with AoT's pre-shards) and under B (`DIFFLET_NEURON_WEIGHT_STORE=0`, original checkpoint). HunyuanVideo and Qwen-Image native have no store, so one cold number each.
