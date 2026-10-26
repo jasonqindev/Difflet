@@ -215,3 +215,14 @@ The user asked whether reading the native weight store belongs to warm rather th
 Only Wan2.1 (DiT: store 217 s vs fp32 checkpoint 435 s) and LTX-2 (Gemma-3: store 178.5 s vs 358 s) differ; HunyuanVideo and Qwen-Image native write no store (bf16 checkpoints, "no gain"). Recommendation: measure both for Wan2.1 and LTX-2 native (A as the headline, B as a supplement, about +10 min each), unless the user wants B only.
 
 **Decided by the user 2026-10-26: measure both.** For Wan2.1 and LTX-2 native, cold e2e is measured under A (weight store in use; the headline, symmetric with AoT's pre-shards) and under B (`DIFFLET_NEURON_WEIGHT_STORE=0`, original checkpoint). HunyuanVideo and Qwen-Image native have no store, so one cold number each.
+
+## Decisions 2026-10-26 (user)
+
+1. Cold e2e: A first (native with its weight store) and AoT for all four models; B (native without the store) only after A and AoT have results for every model. The user wants the A vs AoT comparison first.
+2. Cold e2e definition (D5) approved: drop_caches, fresh process and fresh work dir, all 50 steps, text encoder + DiT + VAE weights read from disk inside the timed run, no stage outputs reused; compiled artifacts (NEFF / NKI cache, native weight store under A, AoT pre-shards) may exist.
+3. bf16 exceptions on native (Wan umT5, Wan VAE, Qwen VAE): pending; the user asked for the trade-offs (answered in chat). Until decided, AoT-only work proceeds.
+4. LTX-2 native Gemma index: cause confirmed (both text_encoder indexes complete since the 2026-10-24 re-download; `build_weight_map` picks `diffusion_pytorch_model.safetensors.index.json`, 0 of its 1124 keys are `language_model.model.*`). Proposed: shadow HF cache for this campaign (no code change), F12 later; awaiting the user's confirmation.
+5. CPU references: all 50 steps; Qwen-Image and LTX-2 first. Order: Qwen + LTX-2 device, then their CPU references, then HunyuanVideo + Wan device, then their CPU references (the user wants CPU results early).
+6. Disk: option A approved: delete the pre-fix AoT roots (`bench-2026-10-25/roots/qwen_aot_tp4`, the two Wan AoT roots, HunyuanVideo `aot_tp4`) and their stale `_shared_weights` entries.
+7. Measurement tooling lives outside the repo (bench dir), approved.
+8. F11 deferred.
