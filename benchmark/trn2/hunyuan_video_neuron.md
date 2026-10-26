@@ -7,11 +7,33 @@
 **Campaign:** 2026-10-25 00:18 – 05:30 UTC (TP4, AoT, VAE) and 09:24 – 13:35 UTC (the other layouts, 720p and the fix checks), branch `feat/hunyuan-neuron`. Native cells at `b38f3bc` (the tp4 default and `--device-vae` cells), `d6ffb9a` (the later TP4 cells, AoT included; that commit only flips the neuron decode default, see "Decode placement"), `4c38a58` (TP2, TP2xCP2 and the first 720p attempt; the commits between `d6ffb9a` and it change only benchmark docs), then `f4d9ac1`, `15b503f`, `ce9d212` and `195fc8c` (the fixes found at 720p, each checked with the runs named in its section). Clean tree up to `4c38a58` (`dirty=0` in each `run.log`); from `f4d9ac1` on, every run shows `dirty=1`. The tree state was recorded only during the `f4d9ac1` runs: this doc, the evidence doc and the feature catalog being edited, no code (`B/hunyuan_video/git_status_during_f4d9ac1_runs.txt`). For the `15b503f`, `ce9d212` and `195fc8c` runs no status was recorded, so "no code" is unverified there; only the `15b503f` 720p log records an attention call shape (`size=(3, 119168, 128)`, as that commit's code would make); the `ce9d212` and `195fc8c` logs record no shapes  
 **Raw evidence:** kept out of git, under `/home/ubuntu/bench-2026-10-25/` on the benchmark host (`B` below): per run `B/hunyuan_video/<cell>/<run>/` holds `run.log` (the CLI output and `/usr/bin/time -v`), `summary.json` (harness record: command, HEAD, meminfo, probe timeline, hashes, mp4 check), `probe/` (per-process events), `nmon.jsonl` (neuron-monitor, 1 s), `out.mp4`, `mid.png` (frame 30) and `work/latents.pt`. `B/hunyuan_video/summary.jsonl` has one line per run. The harness and probe are in `B/scripts/` and `B/probe/`.
 
+**F1/F2 (2026-10-26):** the VAE work and its re-measure at the CLI ran on 2026-10-25/26 on the same host; raw evidence under `/home/ubuntu/bench-2026-10-26/` (`B26` below), with the same harness, probe and summary files per run. The re-measure at the new default (the TP4 table below, "VAE: compiled decoder and in-process decode (F1/F2)") ran 2026-10-25 23:42 – 2026-10-26 00:25 UTC at `eadddec`, clean tree (`dirty=0` in every `run.log`).
+
 Every number below comes from a run made for this report and names its run directory, unless it is marked *reused*. Inferences are labelled.
 
 ## TP4: native vs AoT
 
-> **Since `74fc979` (2026-10-26) native decodes in the generate launch with the compiled bf16 decoder by default:** warm e2e at TP4 117.8-130.1 s against AoT's 132.9 s (section "F1b" below; four runs, not this table's full method). The table below is the earlier default (the eager fp32 vae launch).
+Native is the neuron backend at its default after F1/F2 (`74fc979`, measured at `eadddec`): host Llama/CLIP encode on rank 0, and the decode on rank 0's core inside the generate launch with the compiled bf16 decoder ("VAE: compiled decoder and in-process decode (F1/F2)" below). Full method (cold compile on a fresh root, cold e2e with the page cache dropped, gen0 discarded, n=3 warm), 2026-10-25 23:42 – 2026-10-26 00:25 UTC, `dirty=0` in every `run.log`; raw evidence under `B26 = /home/ubuntu/bench-2026-10-26/`. **The AoT column is *reused*** from the 2026-10-25 campaign (`aot_tp4`, not re-run); the native column before F1/F2 is kept on the right, labelled.
+
+| metric | native, default after F1/F2 (`s4_tp4`) | AoT (`aot_tp4`, *reused*) | native vs AoT | native before F1/F2 (`tp4_devvae`: eager fp32 vae launch, *reused*) |
+|---|---:|---:|---:|---:|
+| DiT step median / p10 / p90 | **808.2** / 807.0 / 810.7 ms (runs 808.0, 808.8, 808.2) | **813.9** / 813.4 / 814.5 ms | −0.7% | 808.3 / 806.7 / 809.9 ms |
+| compile cold | **274.5 s** (one generate launch: DiT warm-up forward 105.2 s, host Llama/CLIP load 15.4 s, decoder load 1.1 s + warm-up decode 117.5 s; 143 NEFFs = 117 DiT + 26 decoder) | **4347.7 s** (a lower bound: pre-sharded DiT and CLIP weights reused) | −93.7% | 2877.2 s (DiT 177 s, eager VAE 1752 s, vae launch exit 927 s) |
+| e2e warm | **126.7 s** (129.2, 130.6, 120.3; gen0 130.5) | **132.9 s** (133.0, 132.9; gen0 135.8) | −4.7% | 239.1 s (241.3, 233.7, 242.1) |
+| e2e cold, page cache dropped | **457.8 s** | **617.3 s** | −25.8% | 570.4 s |
+| peak HBM per core: alloc / neuron-monitor | rank 0's core (DiT shard + decoder): **14.74 / 17.95 GiB**; the other three DiT cores 11.67 / 12.98 GiB | — / 15.52 GiB (DiT and a replicated VAE on every core) | +15.7% on rank 0's core, −16.4% on the others (neuron-monitor) | 11.67 / 12.98 GiB (vae launch: 11.53 / 20.89 GiB on its core) |
+| decode / write | 16.0 s / 0.8-0.9 s | 17.1 s / 0.7 s | | 73.9 s / 21.9 s (the end of the decode, see "F1b") |
+| output (mid frame opened) | fox running through snow, mp4 `edf8d6be…`, latents `b62d0891…` (the same latents as before F1/F2); decoded frames vs the fp32 host decode of these latents: PSNR 56.08 dB | fox running through snow, `201e5ef7…` | | `68adae23…`, latents `b62d0891…` |
+| logs | `B26/hunyuan_video/s4_tp4/{compile,cold,gen0..gen3}/` | `B/hunyuan_video/aot_tp4/` | | `B/hunyuan_video/tp4_devvae/` |
+
+- **Warm e2e: native is now 6.2 s faster than AoT** (126.7 vs 132.9 s; the target was about 150 s or less, from 239.1 s). The three timed runs spread 120.3-130.6 s because rank 0's start-to-load time is 12.2, 21.6 or 22.5 s (launch jitter, open issue 2 of `neuron_final.md`); everything after it varies by under 1 s. Before F1/F2 AoT led by 106 s.
+- **Decode: 16.0 s, inside the 25 s target**, against AoT's 17.1 s; the write is 0.8-0.9 s. Every run of the cell, cold and warm, gave the same latents and mp4 bit for bit, and the mp4 is byte-identical to the standalone compiled decoder's for these latents (`B26/f1b/standalone_vs_inproc/`).
+- **Compile cold: 274.5 s, 10.5x faster than before (2877.2 s) and 15.8x faster than AoT's lower bound.** The decoder now compiles 26 graphs in 117.5 s inside the generate launch instead of 3,751 eager kernels in 1752 s plus a 927 s exit in a launch of its own. The DiT's warm-up forward took 105.2 s here and 121.5 s in `tp4_tracecache/compile` (same 117 NEFFs); the difference was not investigated.
+- **Cold e2e: native is 25.8% faster than AoT** (457.8 vs 617.3 s). Most of native's cold run is still reading the checkpoint: load 356.0 s, of which the DiT checkpoint 194.8 s and the host Llama/CLIP 123.3 s; the decoder adds 7.4 s load + 9.6 s warm-up.
+- **HBM: rank 0's core now holds the decoder too**, 17.95 GiB by neuron-monitor (2.4 GiB more than AoT's cores); the other three stay at 12.98 GiB. The compile run's peak on that core was 13.41 / 16.61 GiB.
+- **The DiT is unchanged:** 808.2 ms per step against 808.3 ms before and 813.9 ms for AoT, same latents.
+
+### Before F1/F2: the eager fp32 vae launch (2026-10-25)
 
 Native is the neuron backend at its default placement after `d6ffb9a` (host Llama/CLIP encode on rank 0, decode in a one-core vae launch). AoT is the Trainium backend (`--backend trainium`, the NxD venv) with its own default placement: CLIP in a one-core stage, Llama TP4 on the device in a stage of its own, then the DiT and a compiled bf16 VAE decoder (replicated on the four ranks) in the generate stage. Both at tp4. "Compile cold" is `difflet compile` on a fresh cache root.
 
@@ -33,9 +55,61 @@ What the table says:
 - **Compile: native is 33.8% faster, and both are dominated by the VAE.** Native's eager decoder compiles 3,751 per-op kernels in 1752 s and its launch then took 927 s to exit (open issue 2); AoT's compiled decoder took 3582 s in neuronx-cc's priority-HLO compile. **AoT's figure is a lower bound:** it reused the pre-sharded DiT (tp4) and CLIP weights already in `~/.cache/difflet/_shared_weights/` from before this campaign ("Reusing pre-sharded checkpoints" in `aot_tp4/compile/run.log`), so it did not pay the weight sharding that dominated AoT compiles in `neuron_final.md`. Native writes nothing (its weight store reports "no gain": the checkpoint is already bf16).
 - **HBM: native uses 2.5 GiB less per DiT core** by neuron-monitor (12.98 vs 15.52 GiB), because its decoder lives in a separate launch; the vae core peaks at 20.89 GiB by neuron-monitor (11.53 GiB allocated; *inference:* the rest is the ~3,750 loaded eager NEFFs).
 - **After `f4d9ac1`** (NKI trace cache, section below) native's warm e2e at tp4 is 222.5 s (one timed run, `tp4_tracecache/gen1`), 89.6 s behind AoT instead of 106 s; the step and the output are unchanged.
-- **Where native could close the warm gap:** a compiled (traced or per-block `torch.compile`) decoder instead of the eager one (open issue 1). The DiT, the host encode and the launch are already level.
+- **Where native could close the warm gap:** a compiled (traced or per-block `torch.compile`) decoder instead of the eager one (open issue 1). The DiT, the host encode and the launch are already level. **Done by F1/F2** (the table above).
+
+## VAE: compiled decoder and in-process decode (F1/F2)
+
+The plan's F1/F2 work (2026-10-26) changed how native decodes: `2e04372` makes the device's bf16 GroupNorm accurate (F2), `1c10dfc` adds the compiled decoder (F1a), and `55ecd5d`, `55761f5`, `ecd1b2d`, `74fc979` move the decode into the generate launch and make that, with the compiled bf16 decoder, the CLI default (F1b). The detailed measurements are in "F2", "F1a" and "F1b" under "Decode placement and VAE dtype"; this section is the before/after at the CLI. All "after" runs are at `eadddec` with no flag (`B26/s4/scripts/queue_s4.sh`: the harness `hvbench_s4.py`, an unchanged copy of `B26/f1b/scripts/hvbench_f1b.py`; breakdowns with `B26/s4/scripts/breakdown_s4.py`, which labels the rank-0 decode correctly). TP4 is the full method above; TP2 and TP2xCP2 gather_kv ran gen0 plus two timed runs each on copies of the F1b roots (`B26/roots/s4_tp2`, `s4_tp2cp2`).
+
+| layout | e2e warm before (eager fp32 vae launch) | e2e warm after (default) | change | DiT step after | decode + write after | rank 0's core after: alloc / neuron-monitor | output after (all runs of the cell) |
+|---|---:|---:|---:|---:|---:|---:|---|
+| TP4 | 239.1 s (n=3, `tp4_devvae`, `b38f3bc`; 222.5 s n=1 after `f4d9ac1`) | **126.7 s** (129.2, 130.6, 120.3; gen0 130.5) | −47.0% | 808.2 ms | 16.0 + 0.8-0.9 s | 14.74 / 17.95 GiB | `edf8d6be…`, latents `b62d0891…`, 5 of 5 equal |
+| TP2 | 300.9 s (n=2, `tp2`, `4c38a58`) | **160.0 s** (164.1, 155.9; gen0 157.2) | −46.8% | 1461.6 ms | 16.0 + 0.9 s | 19.24 / 23.50 GiB | `3f444adc…`, latents `3d0b647e…`, 3 of 3 equal |
+| TP2xCP2 gather_kv | 250.0 s (n=2, `tp2cp2_gather`, `4c38a58`) | **126.0 s** (126.6, 125.5; gen0 137.0) | −49.6% | 905.0 ms | 16.0 + 0.9 s | 19.24 / 22.85 GiB | `32dc3374…`, latents `b50ce0c8…`, 3 of 3 equal |
+
+- **The TP2 and TP2xCP2 "before" runs predate `f4d9ac1`** (the NKI trace cache), so their change also contains that commit's gain: the warm-up forward is now 19.1 s at TP2 (was 63.5 s) and 13.9 s at TP2xCP2 (was 36.8 s). At TP4 the comparison with the same trace cache is 222.5 → 126.7 s (−43%).
+- **Each layout's latents are the same as before F1/F2** (`b62d0891…`, `3d0b647e…`, `b50ce0c8…`): the DiT is untouched; only the decode and its placement changed. Steps 808.2 / 1461.6 / 905.0 ms against 808.3 / 1461.8 / 905.1 ms before.
+- **The decode takes 16.0 s at every layout** (15.98-16.02 s in all 11 generates at the default), the write 0.84-1.19 s.
+- **TP2 misses the ~150 s figure** (the plan's target is set for TP4): its 50-step denoise alone is 73.1 s. TP2xCP2 is level with TP4 here (126.0 vs 126.7 s): its denoise is 4.9 s longer (45.3 vs 40.4 s) and its runs happened to draw the short launch (rank 0 start-to-load 10.9-11.9 s in the timed runs, against 12.2-22.5 s at TP4).
+- Mid frames opened for `s4_tp4/cold`, `s4_tp4/gen1`, `s4_tp2/gen1`, `s4_tp2cp2/gen1` and `s4_tp4_oldpath/gen1`: each shows a red fox running through snow in a forest. Every mp4 has 61 frames at 320x512 with moving content (per-frame pixel std at least 49.4 grey levels, mean frame-to-frame difference at least 32.2 levels).
+
+**Where the warm e2e goes at TP4, before and after** (gen1, seconds; before: `tp4_devvae/gen1`, from "Where the warm e2e goes" below; after: `s4_tp4/gen1`):
+
+| part | before (`tp4_devvae/gen1`) | after (`s4_tp4/gen1`) |
+|---|---:|---:|
+| process wall | 241.3 | **129.2** |
+| launch: driver start to rank 0 start | 2.6 | 2.6 |
+| launch: rank 0 start to load start | 21.0 | 21.6 (12.2 in gen3) |
+| load + warm-up | 57.0 (warm-up forward 36.5) | 42.1 (warm-up forward 13.6; decoder load 1.1 + one-tile warm-up 6.3) |
+| host encode | 2.3 | 2.3 |
+| denoise, 50 steps | 40.4 | 40.4 |
+| vae launch (torchrun, imports, runtime) | 5.3 + 2.3 | — |
+| VAE load | 10.7 | (in the load phase above) |
+| VAE decode | 73.9 (eager fp32) | **16.0** (compiled bf16) |
+| frames to mp4 | 21.9 (the end of the decode, then the write) | 0.8 |
+| teardown and exit | 3.7 | 3.3 |
+
+**Cold, TP4** (`s4_tp4/cold`, page cache dropped, `Cached` 0.21 GiB before): 457.8 s = launch 15.1 + 12.6 s (cold imports), load 356.0 s (DiT checkpoint 194.8, host Llama/CLIP 123.3, DiT warm-up forward 15.2, decoder load 7.4 + warm-up 9.6), host encode 2.3 s, 6.4 s before the denoise (three neuronx-cc subprocesses on rank 3, open issue 6), denoise 43.9 s, decode 16.0 s, write 1.2 s, exit 4.2 s. Before F1/F2: 570.4 s (load + warm-up 360.6, vae launch 7.9 + load 14.4 + decode 76.9 + write 24.2).
+
+**Compile cold, TP4** (`s4_tp4/compile`, fresh root, checkpoint read into the page cache first as in the 2026-10-25 compiles: `Cached` 50.4 GiB): 274.5 s, one generate launch; neuronx-cc ran 143 times (117 DiT graphs as before, 26 decoder graphs). Before F1/F2: 2877.2 s (generate stage 177.3 s; vae launch 1752.3 s of eager kernels plus 927 s to exit).
+
+**Decoded frames against the fp32 host decode of the same latents** (`B26/s4/scripts/frames_vs_fp32.py`, log `B26/s4/frames_vs_fp32.log`). The in-process decode itself is not saved as a tensor; its mp4 is byte-identical to the one the standalone compiled bf16 decoder writes for the same latents (`B26/f1b/standalone_vs_inproc/`, re-checked here with `cmp` against this stage's gen1 mp4s), so that standalone decode stands for it. The fp32 host decodes of the TP4 and TP2xCP2 latents were made for this stage (`B26/s4/hostfp32/`, `vae_repeat.py --device cpu --dtype fp32`); the TP2 latents are `J/cli/tp2_host.work/latents.pt` (`torch.equal`), whose fp32 host decode is `J/vae_cpu_fp32.pt`.
+
+| layout (latents) | latents equal to the decoded ones | rel-L1 | max abs | mean abs (grey levels) | PSNR |
+|---|---|---:|---:|---:|---:|
+| TP4 (`s4_tp4/gen1`, `b62d0891…`) | yes (= `f1b_tp4_inproc/gen1`) | 3.73e-3 | 0.070 | 0.30 | **56.08 dB** |
+| TP2xCP2 gather_kv (`s4_tp2cp2/gen1`, `b50ce0c8…`) | yes (= `f1b_tp2cp2_inproc/gen1`) | 3.72e-3 | 0.077 | 0.30 | **56.09 dB** |
+| TP2 (`s4_tp2/gen1`, `3d0b647e…`) | yes (= `J/cli/tp2_host.work/latents.pt`) | 3.73e-3 | 0.066 | 0.30 | **56.07 dB** |
+
+Gate (plan, default-change rule): bf16 at least 50 dB. **PASS at all three layouts** (56.07-56.09 dB; the fp32 host decodes took 419.5 and 420.3 s on the 12 vCPUs).
+
+**The earlier default still works** (`s4_tp4_oldpath`: `--device-vae --vae-dtype fp32 --vae-exec-mode eager` on a copy of `B26/roots/f1b_tp4`, which holds the eager VAE kernels): gen0 228.8 s, gen1 213.1 s; decode 74.9 s, then 22.3 s in the write ("to uint8 21.62 s", the device finishing the eager decode, "F1b"); step 808.9 ms; the mp4 is byte-identical to `tp4_devvae/gen1`'s (`68adae23…`).
+
+**Targets (plan step 4) against actuals:** warm e2e at TP4 about 150 s or less: **126.7 s** (n=3, max 130.6 s), met; decode 25 s or less: **16.0 s**, met. At TP2 the warm e2e is 160.0 s, above the 150 s figure (see above).
 
 ## Native layouts at 320x512x61: TP2, TP4, TP2xCP2
+
+> Measured before F1/F2 (eager fp32 vae launch). The same layouts at the default after F1/F2: "VAE: compiled decoder and in-process decode (F1/F2)" above (warm e2e TP2 160.0 s, TP4 126.7 s, TP2xCP2 126.0 s).
 
 The three layouts the neuron CLI runs on one trn2.3xlarge at the default shape, each with the default placement after `d6ffb9a` (host encode on rank 0, decode in the one-core fp32 vae launch). The CP cell uses gather_kv: it was the fastest CP mode in the stage-2 DiT checks (full depth, 5x320x512: gather_kv 649.7, ring 672.7, ulysses 1148.3 ms per forward, *reused*, `docs/verification/hunyuan-video-neuron-evidence.md`). Measured at `4c38a58` (no code change since `d6ffb9a`; `dirty=0` in every `run.log`), 2026-10-25 09:24–10:25 UTC. TP4 is the `tp4_devvae` cell above (*reused* from this report, n=3).
 
@@ -109,6 +183,7 @@ The method is `benchmark/trn2/neuron_final.md`'s "Method", with these difference
 - **HBM** = `torch_neuronx.max_memory_allocated()` per rank (max over ranks), plus neuron-monitor's per-core peak of `memory_used` (sum of its categories), from `nmon.jsonl`.
 - **Outputs:** every run's mp4 was decoded and checked (61 frames, 320x512, moving content, not a frozen or uniform clip: in the native runs every frame's pixel std is at least 49 grey levels and the mean frame-to-frame difference 32 levels; in the AoT runs, at least 72 and 20.1 levels), and one `mid.png` per cell was opened: each shows a red fox running through snow in a forest. Within a cell every run, cold and warm, produced the same latents and mp4 bit for bit (hashes in `summary.json`; AoT keeps no latents file, its mp4s are identical).
 - **No exported timeout:** `DIFFLET_NEURON_PG_TIMEOUT_S` is unset in every run (the harness removes it).
+- **The F1/F2 re-measure (2026-10-26, `B26/s4/`)** uses the same method and probe (`B26/probe/`, a copy of `B/probe/`) with these choices: before the TP4 compile, `queue_s4.sh` read the checkpoint's transformer, text encoders and VAE into the page cache (`cat` to `/dev/null`, 5.1 s; `Cached` 50.4 GiB at the compile's start), as the 2026-10-25 TP4 compiles found it; TP2 and TP2xCP2 were not compiled again (their roots are copies of the F1b roots, which hold their DiT and the compiled decoder's NEFFs) and ran gen0 plus n=2; the earlier-default check ran gen0 plus one timed run on a copy of `B26/roots/f1b_tp4`. One device job at a time, `/dev/neuron0` idle before every run (the harness waits for it).
 
 ## Native tp4, default placement at `b38f3bc` (host decode) and with `--device-vae`
 
@@ -275,7 +350,7 @@ Raw evidence under `B26/f1b/` (the VAE runs) and `B26/hunyuan_video/f1b_*` (the 
 | compile (warm root): wall | 354.8 s (the checkpoint and Llama/CLIP not in the page cache: load 194.9 s + 119.4 s) | 217.6 s (warm-up forward 171.3 s) | 164.0 s (warm-up forward 105.1 s) |
 | output | 61 frames, `edf8d6be…`, latents `b62d0891…` (as `tp4_devvae`) | 61 frames, `3f444adc…`, latents `3d0b647e…` (as `tp2`) | 61 frames, `32dc3374…`, latents `b50ce0c8…` (as `tp2cp2_gather`) |
 
-- **The warm TP4 e2e falls from 222.5-239.1 s to 117.8-130.1 s** (four runs at two commits: 127.4, 117.8 at `ecd1b2d` with the flags; 120.7, 130.1 at `74fc979` with no flag, `f1b_tp4_default/`), against AoT's 132.9 s. The spread is the launch jitter of open issue 2 of `neuron_final.md` (rank 0's start-to-load 10.6-22.3 s in these four runs). The plan's targets (warm e2e about 150 s or less, decode 25 s or less) are met at TP4, TP2xCP2 and TP2. Split of `f1b_tp4_inproc/gen1`: launch 2.7 + 10.6 s, load + warm-up 42.0 s (of which the decoder 7.3 s), host encode 2.2 s, denoise 40.4 s, decode 16.0 s, write 0.8 s, teardown and exit 3.0 s.
+- **The warm TP4 e2e falls from 222.5-239.1 s to 117.8-130.1 s** (four runs at two commits: 127.4, 117.8 at `ecd1b2d` with the flags; 120.7, 130.1 at `74fc979` with no flag, `f1b_tp4_default/`), against AoT's 132.9 s. The spread is the launch jitter of open issue 2 of `neuron_final.md` (rank 0's start-to-load 10.6-22.3 s in these four runs). The plan's targets (warm e2e about 150 s or less, decode 25 s or less) are met at TP4 and TP2xCP2; TP2's 157.3-164.3 s is above the 150 s figure (corrected in step 4: the decode target is met there, the e2e one is not; the target is set for TP4). Split of `f1b_tp4_inproc/gen1`: launch 2.7 + 10.6 s, load + warm-up 42.0 s (of which the decoder 7.3 s), host encode 2.2 s, denoise 40.4 s, decode 16.0 s, write 0.8 s, teardown and exit 3.0 s.
 - **It fits beside the DiT at all three layouts.** The decoder adds 3.07 GiB allocated at TP4 and 3.06-3.41 GiB at TP2 and TP2xCP2 (5.0, 4.8 and 4.85 GiB by neuron-monitor). At TP2 rank 0's core peaks at 23.50 of 24 GiB by neuron-monitor: 0.5 GiB to spare. Options that add HBM at TP2 (none measured) could push it over; `--device-vae` keeps the decoder off the DiT's cores. The decode takes the same 16.0 s at every layout: no sign of memory pressure in its time.
 - **The decode is the same decode.** `B26/f1b/scripts/standalone_vs_inproc.py` decoded each layout's gen1 latents with the standalone decoder on one core and wrote them through `_write_video`: the three mp4s are byte-identical to the in-process ones (`B26/f1b/standalone_vs_inproc/run.log`). The TP2 latents are the F1a reference latents (`J/cli/tp2_host.work/latents.pt`, `torch.equal`), and that decode is 56.07 dB, rel-L1 3.73e-3, against the fp32 host decode (`tp2_vs_fp32_host.log`).
 - **Every run of a cell produced the same mp4 and latents**, and the TP4 mp4 is the same with the decode in process (`f1b_tp4_inproc`, `f1b_tp4_default`) and in the vae launch with the same decoder (`f1b_tp4_launch_bf16`): `edf8d6be…`.
@@ -291,7 +366,7 @@ Raw evidence under `B26/f1b/` (the VAE runs) and `B26/hunyuan_video/f1b_*` (the 
 
 - New flags: `--vae-in-process` (the default placement), `--vae-dtype bf16|fp32` and `--vae-exec-mode eager|compile` (the device decoder in either placement; default bf16, compile; refused with `--host-vae`). More than one of `--host-vae`, `--device-vae` and `--vae-in-process` is refused. The driver forwards its resolved choice to the stages (`--vae-placement`), so a stage never applies a default of its own.
 - `compile` with the default placement is one generate launch: its warm-up also warms the decoder (7.3 s warm; about 135 s for the decoder's graphs on a root without them, F1a), and there is no vae launch, so open issue 2 (the compile-mode vae launch's 927 s exit) no longer applies by default. The compile runs above took 354.8, 217.6 and 164.0 s of wall against their stages' 346.2, 209.6 and 155.7 s.
-- Not measured here (left for the TP4 full-method stage): a cold compile on a fresh root, a cold e2e with the page cache dropped, n=3 warm runs at the new default, and the native vs AoT table at the top of this report, which still shows the eager fp32 vae launch.
+- Not measured here: a cold compile on a fresh root, a cold e2e with the page cache dropped, n=3 warm runs at the new default. **Measured in step 4** (2026-10-26, `eadddec`): "TP4: native vs AoT" and "VAE: compiled decoder and in-process decode (F1/F2)" at the top of this report.
 
 ## Extra cells (n=2)
 

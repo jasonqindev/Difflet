@@ -17,6 +17,10 @@ three 720p attempts ran at `f4d9ac1`, `15b503f` and `ce9d212`, and the trace-cac
 "End to end" and "CLI runs" below; the timings are reported in that benchmark doc. A compiler-level
 deep dive into the one open parity result ran on 2026-10-25 14:28-15:25 UTC at `eef92d6`, with no code change
 (section "Compiler-level cause of the full-depth t=900 result"; its files are under `J/s3/`).
+The VAE work of the plan's F1/F2 items (2026-10-25/26: the device's bf16 GroupNorm fix `2e04372`,
+the compiled decoder `1c10dfc`, the decode in the generate launch `ecd1b2d`/`74fc979`) and the CLI
+re-measure at the new default (2026-10-25 23:42 - 2026-10-26 00:25 UTC at `eadddec`, clean tree)
+are in "VAE decode after F1/F2" below; their evidence is under `B26 = /home/ubuntu/bench-2026-10-26/`.
 
 Logs, result JSONs, oracles and diagnosis dumps are kept outside the repo, as the job rules
 require, under `J = /home/ubuntu/.claude/jobs/28e8164e/tmp/hv1_device/`; the CLI runs' evidence is
@@ -82,6 +86,18 @@ missed the gate) · **NOT MEASURED** (not run in this stage).
   past a size whose NKI compile overflows. See the bug ledger.
 * **720x1280x129 at TP4: BLOCKED.** After those fixes the block graph's neuronx-cc compile needs
   more than the host's 124.8 GiB and is OOM-killed; no forward ran (see "CLI runs").
+* **VAE (F2): the device's bf16 GroupNorm was the cause of the 20.8 dB bf16 decode; fixed by
+  `2e04372`.** Bisection on one tile found every op but GroupNorm at the host's bf16 error; the
+  device's GroupNorm error grows with the elements per group (0.20-0.38 rel-L1 at 1.2M-2.4M,
+  1.35-2.05 at 4.5M-8.9M; host bf16 2.2e-3-3.8e-3). With its statistics in fp32 the device's
+  eager bf16 decode is at 55.9 dB against the fp32 host decode, as bf16 on the host is; fp32 is
+  bit-identical to before. See "VAE decode after F1/F2".
+* **VAE (F1): the compiled bf16 decoder in the generate launch is the CLI default (`74fc979`)**
+  and passes the default-change rule: 56.07 dB against the fp32 host decode (gate 50 dB), run at
+  TP2, TP4 and TP2xCP2. At TP4 (full method, `eadddec`): warm e2e 126.7 s (was 239.1 s; AoT
+  132.9 s, *reused*), cold e2e 457.8 s (was 570.4 s), compile cold 274.5 s (was 2877.2 s), decode
+  16.0 s, same latents as before; rank 0's core 14.74 / 17.95 GiB. The earlier default still runs
+  by flag and gives the same mp4 as before.
 
 | item | value |
 |---|---|
@@ -273,6 +289,67 @@ The plan's Step 4 names TP2xCP2 ulysses; the CP cell ran gather_kv instead becau
 fastest CP mode in the DiT checks above (649.7 ms per full-depth forward against ring 672.7 and
 ulysses 1148.3). Ulysses and ring have the same DiT parity results as gather_kv (PASS at truncated
 depth, 1.188x and 1.190x on the full-depth t=900 input), but their CLI runs are **NOT MEASURED**.
+
+### VAE decode after F1/F2 (2026-10-25/26)
+
+Evidence under `B26 = /home/ubuntu/bench-2026-10-26/`; timings and the full tables are in
+`benchmark/trn2/hunyuan_video_neuron.md` ("VAE: compiled decoder and in-process decode (F1/F2)",
+"F2", "F1a", "F1b"). Reference for every accuracy row: the fp32 host decode of the same latents
+(diffusers' tiled decode, `J/vae_cpu_fp32.pt` for `J/cli/tp2_host.work/latents.pt`).
+
+**F2 finding.** Bisection on the first tile of the tiled decode (`latents[:, :, 0:5, 0:32, 0:32]`
+through `post_quant_conv` + decoder, forward hooks on all 174 module calls, device bf16 and host
+bf16 against host fp32; `B26/f2/bisect/`, `B26/scripts/f2_bisect.py`): the tile's output is 0.329
+rel-L1 on the device against 3.3e-3 for host bf16, with the jumps at GroupNorms
+(`up_blocks.2.resnets.0.norm1` 0.385 vs 1.8e-2, `up_blocks.3.resnets.0.norm1` 1.55 vs 1.0e-2).
+Each module alone on the fp32 input cast to bf16: Conv3d, SiLU, the upsampling and `to_out` match
+the host (1.00x), `to_q/k/v` are 0.82-0.93x, and GroupNorm grows with the elements per group
+(2.8-6.6x the host at 81,920, 542-685x at 4.5M-8.9M). The GroupNorm micro-test on the device
+(`B26/f2/gn_micro.log`) shows the raw bf16 kernel at 3.11-4.83 rel-L1 at 8.9M elements per group;
+through `F.group_norm` with the workaround it equals host bf16 to within 1e-7 at every size.
+*Inference:* the device kernel accumulates the group statistics at bf16 precision.
+**Fix `2e04372`:** `install_group_norm_fp32` (`difflet/backends/neuron/core/workarounds.py`,
+installed by `prepare_runtime`) computes bf16 `F.group_norm` on neuron tensors in fp32; other dtypes
+and devices are untouched. CPU tests in `tests/unit/backends/test_neuron_bool_bitwise_guard.py` and
+`test_neuron_backend.py` (the three new tests failed before the fix).
+
+**Decode accuracy** (latents `J/cli/tp2_host.work/latents.pt` unless the row says otherwise):
+
+| decoder | gate | result | status | evidence |
+|---|---|---|---|---|
+| device, eager fp32 (the CLI's decoder before `74fc979`) | rel-L1 <= 1e-6 | rel-L1 3.5e-7, 136.7 dB; after `2e04372` bit-identical (`torch.equal`), no new kernel | **PASS** | `B/hunyuan_video/vae/neuron_fp32*/`, `B26/f2/f2_neuron_fp32_gnfp32/` |
+| device, eager bf16, before `2e04372` | >= 50 dB | rel-L1 0.226, 20.8 dB, visible banding | **FAIL** (fixed) | `B/hunyuan_video/vae/neuron_bf16_{cold,warm}/` |
+| device, eager bf16, after `2e04372` | >= 50 dB | rel-L1 3.80e-3, 55.9 dB, bit-identical across processes | **PASS** | `B26/f2/f2_neuron_bf16_gnfp32{,_warm}/` |
+| host, bf16 (control) | | rel-L1 3.8e-3, 55.9 dB | | `B/hunyuan_video/vae/cpu_bf16/` |
+| device, compiled bf16, fixed tiles (`1c10dfc`; the CLI default from `74fc979`) | >= 50 dB | rel-L1 3.73e-3, 56.07 dB, bit-identical across repeats and processes | **PASS** | `B26/f1a/fixed_bf16_v2_{cold,warm}/`, `fixed_bf16_commit_check/` |
+| device, compiled fp32, fixed tiles | >= 60 dB | rel-L1 2.5e-7, 139.3 dB | **PASS** | `B26/f1a/fixed_fp32_v2_{cold,warm}/` |
+| host, fp32, the AoT path's tiling (edge tiles padded, decoder not confined to the window) | >= 60 dB | rel-L1 1.34e-2, 42.5 dB against diffusers' tiled decode | **FAIL** (why `1c10dfc` has the valid-extent decoder) | `B26/f1a/aot_semantics_full.log` |
+| CLI default after F1/F2, TP4 latents (`s4_tp4/gen1`, `b62d0891…`) vs their fp32 host decode (`B26/s4/hostfp32/s4_tp4.0.pt`) | >= 50 dB | rel-L1 3.73e-3, 56.08 dB | **PASS** | `B26/s4/frames_vs_fp32.log` |
+| CLI default after F1/F2, TP2xCP2 gather_kv latents (`b50ce0c8…`) vs their fp32 host decode | >= 50 dB | rel-L1 3.72e-3, 56.09 dB | **PASS** | `B26/s4/frames_vs_fp32.log` |
+| CLI default after F1/F2, TP2 latents (`3d0b647e…`, equal to `J/cli/tp2_host.work/latents.pt`) | >= 50 dB | rel-L1 3.73e-3, 56.07 dB | **PASS** | `B26/s4/frames_vs_fp32.log` |
+
+The CLI rows compare the standalone compiled bf16 decode of each layout's latents (`B26/f1b/standalone_vs_inproc/dec/`), whose mp4 is byte-identical to the in-process run's (`cmp` with this stage's gen1 mp4s); the in-process decode is not saved as a tensor.
+
+**CLI runs at the default after F1/F2** (`eadddec`, no flag: decode on rank 0's core in the generate
+launch with the compiled bf16 decoder; harness `B26/s4/scripts/hvbench_s4.py`, runs listed by
+`B26/s4/scripts/queue_s4.sh`). Same gate as the stage-4 table above. TP4 ran the full method
+(cold compile on a fresh root, cold e2e, gen0, n=3); TP2 and TP2xCP2 gather_kv ran gen0 and n=2 on
+copies of the F1b roots. Mid frames opened in every cell: a red fox running through snow.
+
+| layout | gate | DiT step median (ms) | e2e warm (s) | e2e cold (s) | compile cold (s) | decode (s) | rank 0's core alloc / neuron-monitor (GiB) | latents (all runs of the cell) | evidence |
+|---|---|---|---|---|---|---|---|---|---|
+| TP4 | **PASS** | 808.2 (n=3) | 126.7 (was 239.1) | 457.8 (was 570.4) | 274.5 (was 2877.2) | 16.0 | 14.74 / 17.95 | `b62d0891…`, 5 of 5 equal (as before F1/F2); mp4 `edf8d6be…` | `B26/hunyuan_video/s4_tp4/` |
+| TP2 | **PASS** | 1461.6 (n=2) | 160.0 (was 300.9) | NOT MEASURED | NOT MEASURED | 16.0 | 19.24 / 23.50 | `3d0b647e…`, 3 of 3 equal (as before) | `B26/hunyuan_video/s4_tp2/` |
+| TP2xCP2 gather_kv | **PASS** | 905.0 (n=2) | 126.0 (was 250.0) | NOT MEASURED | NOT MEASURED | 16.0 | 19.24 / 22.85 | `b50ce0c8…`, 3 of 3 equal (as before) | `B26/hunyuan_video/s4_tp2cp2/` |
+| TP4, `--device-vae --vae-dtype fp32 --vae-exec-mode eager` (the earlier default) | **PASS** | 808.9 (n=1) | 213.1 (gen0 228.8) | | | 74.9 | vae core 11.53 / 20.89 | `b62d0891…`, 2 of 2; mp4 byte-identical to `tp4_devvae/gen1` (`68adae23…`) | `B26/hunyuan_video/s4_tp4_oldpath/` |
+
+Every run: exit 0, `compiled_blocks=60 unwarmed_shapes=[] fallbacks: load=[] generate=[]` on every
+rank (50 of 50 rank lines), 61 frames at 320x512, per-frame std at least 49.4 grey levels. The
+first generate after the compile (`s4_tp4/cold`) ran three neuronx-cc subprocesses on rank 3 (6.4 s
+before the denoise), as the 2026-10-25 cold runs did (open issue 6 of the benchmark doc); no warm
+run compiled anything. The plan's step-4 targets: warm e2e at TP4 about 150 s or less, **met**
+(126.7 s, n=3, max 130.6 s); decode 25 s or less, **met** (16.0 s). TP2's warm e2e (160.0 s) is
+above the 150 s figure.
 
 ## Diagnosis of the full-depth t=900 failure
 
@@ -538,7 +615,9 @@ Stage 2 (DiT parity) and stage 3 (end to end) found no Difflet bugs and made no 
 The compiler-level deep dive found no Difflet bug either: the full-depth t=900 excess is
 neuronx-cc's default mixed-precision accumulation (see its section).
 The one environment failure, the missing PATH entry for `neuronx-cc`, is recorded under
-Environment. The CLI runs found three bugs, each fixed in its own commit, and one suspected bug that the device refuted:
+Environment. The CLI runs found three bugs, each fixed in its own commit, and one suspected bug that the device refuted.
+The F1/F2 stage (2026-10-25/26) found one Difflet-side precision bug on the device (row 5) and four
+neuronx-cc limits that the compiled decoder works around (row 6):
 
 | # | layout | symptom | root cause | fix |
 |---|---|---|---|---|
@@ -546,6 +625,8 @@ Environment. The CLI runs found three bugs, each fixed in its own commit, and on
 | 2 | TP4, 720x1280x129 | `difflet compile` had all 4 ranks at 100% CPU, no neuronx-cc running, for 30 minutes after the small graphs compiled; killed at 1806 s (`B/hunyuan_video/tp4_720p.killed_nki_trace/compile/run.log`) | py-spy (`.../compile_pyspy_rank1_blocking.txt`): nki tracing nkilib's `attention_cte` under torch-neuronx's `get_kernel_config` in fake-tensor mode, from `flash_attention_bounded`. That trace grows with the joint length (119,056 tokens) and is repeated in every process unless torch-neuronx's NKI trace cache keeps it; Difflet turns that cache off unless `DIFFLET_NKI_TRACE_CACHE` opts in, which HunyuanVideo 1.5's CLI does and 1.0's did not | `f4d9ac1`: the neuron launches opt in; `test_launches_opt_into_the_nki_trace_cache`. At 320x512x61 it also cuts the warm-up forward of every launch from 36.5 s (`tp4_teacache2/gen1`, `d6ffb9a`, same root as `tp4_devvae`) to 13.5 s (`B/hunyuan_video/tp4_tracecache/`), output bit-identical |
 | 3 | TP4, 720x1280x129 | after fix 2, the compile failed on every rank: `flash_attention_bounded(FakeTensor(size=(6, 119168, 128)))`: `BIR emission failed ... colz: body blob exceeds uint32 offset range` (`B/hunyuan_video/tp4_720p.blob_overflow/compile/run.log`) | one bounded-kernel call takes all of a rank's heads; its NKI body grows with heads x seqlen_q x seqlen_k and overflows a 32-bit offset (8.5e10 here; nkilib tests up to 4.35e10). At 3 heads (4.26e10) it still overflowed (`15b503f`, `tp4_720p.blob_overflow_3heads/`) | `15b503f` then `ce9d212`: calls above 16 x 36864^2 = 2.17e10 are split into equal head chunks (one head at 720p); unit tests in `test_neuron_attention_c3.py`. On the device the kernel then compiles, and the next limit is host memory (neuronx-cc OOM-killed at 109.8 GiB resident, `tp4_720p.host_oom_1head/`): **open** |
 | 4 (not a bug) | TP4, 320x512x61 | after `ce9d212`, a generate on a root compiled at `f4d9ac1` ran two neuronx-cc compiles (the dual and single block graphs; warm-up forward 75 s instead of 13.5 s), output bit-identical (`B/hunyuan_video/tp4_tracecache/gen2_ce9d212/`) | first suspected: the head-split loop slicing the inputs even for one call. `195fc8c` restored the unsliced single call, and the next generate (`gen3_head`, at `195fc8c`) **still** compiled both block graphs (69.4 s warm-up), with NEFFs of a third size (7,785,177 / 6,994,062 bytes against 7,801,464 / 6,996,905 at `f4d9ac1` and 7,802,415 / 6,991,577 at `ce9d212`). The block NEFFs carry `source_line` debug metadata for the ops from `ops_impl/attention.py` (`debug_info/debug_info_hlo.dbg_*`), so *inference:* any edit that moves lines in that file changes the compiled graph's key, and every cache compiled before the edit compiles its blocks once more. That is torch-neuronx's cache keying, not a Difflet bug; `195fc8c`'s stated cause is refuted, and its code (the single call as it was before the split) is kept | none needed; one recompile per cache root after `15b503f`..`195fc8c` (about 60 s at TP4, 320x512x61) |
+| 5 | one core, VAE decode, 320x512x61 latents | the device's eager bf16 decode was at 20.8 dB against the fp32 host decode (rel-L1 0.226, colour banding) while bf16 on the host was at 55.9 dB (`B/hunyuan_video/vae/neuron_bf16_*`) | the device's bf16 `F.group_norm` (torch-neuronx 2.14.3.0.1 / neuronx-cc 2.28) loses precision as the elements per group grow: rel-L1 6e-3-2e-2 at 81,920, 0.20-0.38 at 1.2M-2.4M, 1.35-2.05 at 4.5M-8.9M (host bf16 2e-3-4e-3); every other decoder op matches the host (`B26/f2/bisect/`, `B26/f2/gn_micro.log`) | `2e04372`: `install_group_norm_fp32` computes bf16 GroupNorm on neuron tensors in fp32; 3 CPU tests. Device bf16 decode 55.9 dB, fp32 bit-identical (`B26/f2/`) |
+| 6 (toolchain, worked around) | one core, compiled VAE decoder at the 5x32x32 latent tile | neuronx-cc 2.28: `NCC_EVRF009` (the whole decoder as one graph exceeds the 24 GB HBM limit), `NCC_ILSA902` (internal error on `torch.where` selects), `NCC_ITRF901` (internal error on the frame-doubling upsamplers), and a GroupNorm fused with a 3D conv making the conv 8x slower (0.68 vs 0.08 s per resnet) (`B26/f1a/`) | compiler limits, not Difflet bugs | `1c10dfc`: the decoder is compiled in 26 regions, masks multiplied in, the upsampler conv in its own region, resnets split into norm / conv regions; tests in `tests/unit/models/hunyuan_video/test_hunyuan_video_vae_tiling.py`, `tests/unit/backends/test_neuron_hv1_vae.py` |
 
 ## How to inspect manually
 
@@ -574,6 +655,13 @@ Environment. The CLI runs found three bugs, each fixed in its own commit, and on
   step deltas, `nmon_peak_gib`), `mid.png` (open it) and `out.mp4`.
   `B/scripts/breakdown.py B/hunyuan_video/<cell>/<run>` prints the e2e breakdown and
   `B/scripts/hvinfo.py <run dirs>` the load phases, neuronx-cc compiles and HBM.
+* **The F1/F2 runs:** a CLI run under `B26/hunyuan_video/<cell>/<run>/` has the same files as above;
+  `python B26/s4/scripts/breakdown_s4.py B26/hunyuan_video/s4_tp4/gen1` prints the breakdown with
+  the decode on rank 0 (`B/scripts/breakdown.py` labels that decode as a vae launch), and
+  `breakdown_s4.py --cell B26/hunyuan_video/s4_tp4 gen1,gen2,gen3` the cell statistics. The decode
+  accuracy: `B26/s4/frames_vs_fp32.log` (`B26/s4/scripts/frames_vs_fp32.py`); a VAE decode run:
+  `B26/f2/<run>/` and `B26/f1a/<run>/` (`run.log` ends in `RESULT {...}` with times and
+  `vs_ref`).
 * **A 720p attempt:** `grep -v 'not tested' B/hunyuan_video/tp4_720p.<attempt>/compile/run.log |
   grep -E 'BIR emission|F137|RuntimeError'`; the OOM kill is in
   `B/hunyuan_video/tp4_720p.host_oom_1head/dmesg_oom.txt`.

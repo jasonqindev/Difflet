@@ -16,20 +16,21 @@ Every number below comes from a run made for this report and names its run direc
 
 ## Summary: three models at TP4, native vs AoT
 
-All three were measured on this host on 2026-10-25 with the same method (cold compile on a fresh root, cold e2e with the page cache dropped, gen0 discarded, n=3 timed warm runs, except HunyuanVideo's AoT cell with n=2: 133.0 and 132.9 s). The HunyuanVideo row is *reused* from `hunyuan_video_neuron.md` (its "TP4: native vs AoT" table); the other two are this report's sections below. Native vs AoT is (native − AoT) / AoT: negative means native is faster or smaller.
+All three were measured on this host on 2026-10-25 with the same method (cold compile on a fresh root, cold e2e with the page cache dropped, gen0 discarded, n=3 timed warm runs, except HunyuanVideo's AoT cell with n=2: 133.0 and 132.9 s). The HunyuanVideo rows are *reused* from `hunyuan_video_neuron.md` (its "TP4: native vs AoT" table: native re-measured with the same method on 2026-10-26 after the F1/F2 VAE work, AoT not re-run); the other two are this report's sections below. Native vs AoT is (native − AoT) / AoT: negative means native is faster or smaller.
 
 | model, workload | DiT step median: native / AoT | compile cold: native / AoT | e2e warm: native / AoT | e2e cold: native / AoT | peak HBM per DiT core (neuron-monitor): native / AoT |
 |---|---|---|---|---|---|
-| HunyuanVideo 1.0, 320x512x61, 50 steps (*reused*, `hunyuan_video_neuron.md`) | 808.3 / 813.9 ms (−0.7%) | 2877.2 / 4347.7 s (−34%; AoT a lower bound: pre-sharded weights reused) | 239.1 / 132.9 s (+80%) | 570.4 / 617.3 s (−7.6%) | 12.98 / 15.52 GiB (−16%) |
+| HunyuanVideo 1.0, 320x512x61, 50 steps, native after F1/F2 (2026-10-26, `eadddec`; *reused*, `hunyuan_video_neuron.md`; AoT the same 2026-10-25 cell) | 808.2 / 813.9 ms (−0.7%) | 274.5 / 4347.7 s (−93.7%; AoT a lower bound: pre-sharded weights reused) | 126.7 / 132.9 s (−4.7%) | 457.8 / 617.3 s (−25.8%) | 17.95 / 15.52 GiB on rank 0's core, which also holds the decoder (+15.7%); 12.98 GiB on the other three (−16%) |
+| HunyuanVideo 1.0, same, native before F1/F2 (eager fp32 vae launch, 2026-10-25) | 808.3 / 813.9 ms (−0.7%) | 2877.2 / 4347.7 s (−34%) | 239.1 / 132.9 s (+80%) | 570.4 / 617.3 s (−7.6%) | 12.98 / 15.52 GiB (−16%) |
 | Qwen-Image, 1024x1024, 50 steps | 359.0 / 418.2 ms (−14.2%; 331.0 ms with `--sp`, −20.9%) | 187.0 / 1238.5 s (−84.9%) | 82.3 / 75.4 s (+9.2%) | 502.0 / 504.2 s (−0.4%) | 10.81 / 10.29 GiB (+5.1%) |
 | Wan2.1 14B, 480x832x9, 50 steps, AoT with two-core attention | 1063.6 / 955.8 ms (+11.3%; 1042.7 ms with `--sp`, +9.1%) | 600.3 / 445.1 s (+34.9%) | 128.5 / 120.0 s (+7.1%) | 542.7 / 447.5 s (+21.3%) | 15.15 / 10.37 GiB (+46%) |
 | Wan2.1 14B, same, AoT stock | 1063.6 / 1150.8 ms (−7.6%) | 600.3 / 453.3 s (+32.4%) | 128.5 / 131.5 s (−2.3%) | 542.7 / 455.6 s (+19.1%) | 15.15 / 10.34 GiB (+47%) |
 
 - **DiT step:** native is level with AoT on HunyuanVideo and 14% faster on Qwen-Image. On Wan2.1 it beats stock AoT by 7.6% but trails two-core AoT by 11.3%. Wan's two-core AoT traces the NKI attention for both physical cores of a logical core; HunyuanVideo's and Qwen-Image's AoT CLIs already do.
-- **Warm e2e:** AoT leads on all three, counting Wan's two-core AoT; native beats Wan's stock AoT by 3.0 s. The gap is 8.5 s on Wan2.1 and 6.9 s on Qwen-Image, and on both most of it is native's launch: 20–24 s from rank start to load start. On HunyuanVideo the gap is 106 s, almost all of it native's eager fp32 decode.
-- **Cold e2e:** native is level or ahead on HunyuanVideo and Qwen-Image, and 21% behind on Wan2.1. Wan's cold load includes 172.5 s for the fp32 umT5, which the weight store does not cover.
-- **Compile:** native compiles 85% faster on Qwen-Image and 34% faster on HunyuanVideo, but 35% slower on Wan2.1. Wan's compile writes the bf16 weight store (192–215 s per rank), and its vae launch fills the eager kernel cache (170 s).
-- **HBM:** native uses more HBM per DiT core only on Wan2.1, 4.8 GiB more. *Inference:* most of that is the umT5 on the device in fp32 (5.68 GB per rank) against AoT's bf16 umT5 (10.84 GB over 4 shards).
+- **Warm e2e:** on 2026-10-25 AoT led on all three, counting Wan's two-core AoT (HunyuanVideo after F1/F2: native leads, below); native beats Wan's stock AoT by 3.0 s. The gap is 8.5 s on Wan2.1 and 6.9 s on Qwen-Image, and on both most of it is native's launch: 20–24 s from rank start to load start. On HunyuanVideo the gap was 106 s, almost all of it native's eager fp32 decode; after F1/F2 (2026-10-26: compiled bf16 decoder on rank 0's core in the generate launch) native leads by 6.2 s (126.7 vs 132.9 s).
+- **Cold e2e:** native is level or ahead on HunyuanVideo (25.8% ahead after F1/F2) and Qwen-Image, and 21% behind on Wan2.1. Wan's cold load includes 172.5 s for the fp32 umT5, which the weight store does not cover.
+- **Compile:** native compiles 85% faster on Qwen-Image and 34% faster on HunyuanVideo (94% after F1/F2), but 35% slower on Wan2.1. Wan's compile writes the bf16 weight store (192–215 s per rank), and its vae launch fills the eager kernel cache (170 s).
+- **HBM:** native uses more HBM per DiT core only on Wan2.1, 4.8 GiB more, and, after F1/F2, on HunyuanVideo's rank 0 core, which now also holds the decoder (2.4 GiB more than AoT's cores). *Inference:* most of that is the umT5 on the device in fp32 (5.68 GB per rank) against AoT's bf16 umT5 (10.84 GB over 4 shards).
 
 ## Qwen-Image
 
