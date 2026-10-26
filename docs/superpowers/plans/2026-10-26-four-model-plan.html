@@ -121,7 +121,7 @@ footer { border-top: 1px solid var(--rule); padding-top: 16px; font-size: 0.85re
     <div class="card"><span class="chip run">运行中</span><p class="big">第 1 批</p><p class="muted">准备工作、Qwen-Image AoT、LTX-2 AoT（设备）</p></div>
     <div class="card"><span class="chip run">运行中</span><p class="big">F12</p><p class="muted">修复 LTX-2 Gemma 加载问题（CPU，和设备并行）</p></div>
     <div class="card"><span class="chip reuse">可复用</span><p class="big num">12 / 48</p><p class="muted">格数据可以复用（HunyuanVideo、Qwen、Wan 的 native 计时）</p></div>
-    <div class="card"><span class="chip todo">预计</span><p class="big num">≈ 27 h</p><p class="muted">从现在到全部完成的总时间（设备约 12 h，CPU 参考约 14 h）</p></div>
+    <div class="card"><span class="chip todo">预计</span><p class="big num">≈ 28 h</p><p class="muted">从现在到全部完成的总时间（设备约 13 h，CPU 参考约 14 h）；约 22 h 后出画质结果和报告</p></div>
   </div>
 </section>
 
@@ -154,7 +154,7 @@ footer { border-top: 1px solid var(--rule); padding-top: 16px; font-size: 0.85re
       <tbody>
         <tr><td>双 core attention</td><td>两边都用。native 已经是双 core，不用改代码（编译出的程序里 attention 拆成 lnc0 / lnc1 两个子图）。AoT：Qwen、HunyuanVideo 在 main 上默认就是；LTX-2、Wan 要设 <span class="mono">NEURON_RT_VIRTUAL_CORE_SIZE=2</span>，并核对 DiT 确实编成了双 core 版本。</td></tr>
         <tr><td>AoT 用哪份代码</td><td>最新的 main（含 bf16 修复），在单独的 worktree <span class="mono">/home/ubuntu/aot-main</span> 里跑，不动当前分支。修复前测的 AoT 数字全部不复用。</td></tr>
-        <tr><td>dtype</td><td>两边尽量 bf16。设备测量阶段，native 的 Wan umT5、Wan VAE、Qwen VAE 维持 fp32；设备测量全部跑完后，再改成 bf16 重测。</td></tr>
+        <tr><td>dtype</td><td>两边尽量 bf16。native 的 Wan umT5、Wan VAE、Qwen VAE 在主测量（设备、CPU 参考、报告、口径 B）里都维持 fp32；之后的第 3 批再把它们改成 bf16 重测，umT5 要先过 F13 的精度检查。</td></tr>
         <tr><td>冷启动定义</td><td>清空 page cache；全新进程、全新工作目录；跑满 50 步；文本编码器、DiT、VAE 的权重都在计时内从磁盘读；不复用任何中间结果；编译好的程序可以事先存在。</td></tr>
         <tr><td>LTX-2 Gemma</td><td>从代码上修（F12），在 LTX-2 native 测量之前完成。</td></tr>
         <tr><td>CPU 参考</td><td>全部 50 步，共 7 份（Qwen、LTX-2、HunyuanVideo 各两份，Wan 一份），先做 Qwen 和 LTX-2。</td></tr>
@@ -181,21 +181,21 @@ footer { border-top: 1px solid var(--rule); padding-top: 16px; font-size: 0.85re
         <div class="track">
           <div class="bar dev" tabindex="0" data-s="0" data-d="2.5" data-tip="第 1 批（运行中）：准备 + Qwen-Image AoT（约 50 min）+ LTX-2 AoT（约 1 h）">第 1 批 AoT</div>
           <div class="bar dev" tabindex="0" data-s="2.5" data-d="5" data-tip="第 2 批：Qwen native 核对 hash + 画质运行（3 min）→ LTX-2 native 完整测量（45 min）→ HunyuanVideo AoT（2 h）→ Wan AoT（2.1 h）→ HunyuanVideo / Wan native 核对 hash + 画质运行（6 min）">第 2 批：LTX native、HV / Wan AoT</div>
-          <div class="bar dev" tabindex="0" data-s="7.5" data-d="4.75" data-tip="第 3 批：Qwen / Wan 的 VAE 改 bf16 后验证精度（约 1 h）、umT5 bf16 精度检查 F13（约 2.5 h，范围待确认）、Qwen 和 Wan native 重测（约 1.25 h）">第 3 批：bf16 重测</div>
+          <div class="bar dev" tabindex="0" data-s="22" data-d="0.75" data-tip="口径 B：Wan 和 LTX-2 的 native 冷启动，关掉 weight store（约 40 min）。放在第 3 批之前，和口径 A 用同样的 dtype">B</div>
+          <div class="bar dev" tabindex="0" data-s="22.75" data-d="4.75" data-tip="第 3 批：Qwen / Wan 的 VAE 改 bf16 后验证精度（约 1 h）、umT5 bf16 精度检查 F13（约 2.5 h）、Qwen 和 Wan native 重测（约 1.25 h）">第 3 批：bf16（含 umT5）</div>
           <div class="now" style="left:0%" title="现在"></div>
         </div></div>
       <div class="lane"><div class="ll">CPU 重任务<small>占满 CPU、内存和磁盘</small></div>
         <div class="track">
-          <div class="bar cpuh" tabindex="0" data-s="12.25" data-d="5.3" data-tip="CPU 参考：Qwen ×2（各约 1.35 h）、LTX-2 ×2（各约 1.3 h）">Qwen、LTX-2 参考</div>
-          <div class="bar cpuh" tabindex="0" data-s="17.55" data-d="8.7" data-tip="CPU 参考：Wan ×1（约 2–2.5 h）、HunyuanVideo ×2（各约 3–3.8 h）">Wan、HV 参考</div>
-          <div class="bar cpul" tabindex="0" data-s="26.25" data-d="0.5" data-tip="算 PSNR / SSIM，写总报告">报告</div>
-          <div class="bar dev" tabindex="0" data-s="26.75" data-d="0.75" data-tip="口径 B：Wan 和 LTX-2 的 native 冷启动，关掉 weight store（设备，约 40 min）">B</div>
+          <div class="bar cpuh" tabindex="0" data-s="7.5" data-d="5.3" data-tip="CPU 参考：Qwen ×2（各约 1.35 h）、LTX-2 ×2（各约 1.3 h）">Qwen、LTX-2 参考</div>
+          <div class="bar cpuh" tabindex="0" data-s="12.8" data-d="8.7" data-tip="CPU 参考：Wan ×1（约 2–2.5 h）、HunyuanVideo ×2（各约 3–3.8 h）">Wan、HV 参考</div>
+          <div class="bar cpul" tabindex="0" data-s="21.5" data-d="0.5" data-tip="算 PSNR / SSIM，写总报告">报告</div>
         </div></div>
       <div class="lane"><div class="ll">CPU 轻任务<small>和设备同时进行</small></div>
         <div class="track tall">
           <div class="bar cpul" tabindex="0" data-s="0" data-d="1.5" data-tip="F12：修复 LTX-2 Gemma 加载问题，代码加单元测试；单元测试只在设备空闲时跑（运行中）">F12</div>
           <div class="bar cpul" tabindex="0" data-s="1.5" data-d="3" data-tip="准备 CPU 参考脚本（HunyuanVideo、Wan）、PSNR/SSIM 计算工具、native 噪声捕获">参考脚本和画质工具</div>
-          <div class="bar cpul row2" tabindex="0" data-s="4.5" data-d="2.5" data-tip="bf16 改动的代码和单元测试（Wan、Qwen 的 VAE；umT5 待确认），为第 3 批准备">bf16 改动代码</div>
+          <div class="bar cpul row2" tabindex="0" data-s="4.5" data-d="3" data-tip="提前准备第 3 批：Wan、Qwen 的 VAE 改 bf16，umT5 改 bf16 的开关和 F13 精度检查脚本，加单元测试（先不合进默认路径，不影响主测量）">第 3 批代码准备</div>
           <div class="bar cpul row2" tabindex="0" data-s="0" data-d="4.5" data-tip="整理文档、核对数据">文档整理</div>
         </div></div>
     </div>
@@ -209,7 +209,7 @@ footer { border-top: 1px solid var(--rule); padding-top: 16px; font-size: 0.85re
     <div class="card"><h3><span class="chip redo">不能并行</span>CPU 参考之间</h3><p class="muted">每份要 60–82 GB 内存，整机 124.8 GiB，同时跑两份会内存不够；CPU 也被同一组核心分走，并不会更快。</p></div>
     <div class="card"><h3><span class="chip done">可以并行</span>轻任务和设备测量</h3><p class="muted">F12、bf16 改动、参考脚本和画质工具的准备、文档。单元测试会打开 <span class="mono">/dev/neuron0</span>，只在设备空闲的空档跑。</p></div>
   </div>
-  <p class="col muted"><strong>可以再快一点的选项：</strong>CPU 参考只依赖初始噪声，不受第 3 批 bf16 改动影响。如果更急着要 CPU 结果，可以把 CPU 参考挪到第 3 批之前，Qwen 和 LTX-2 的画质结果能提前约 5 小时出来，代价是 bf16 重测往后推。</p>
+  <p class="col muted"><strong>顺序说明：</strong>第 2 批之后直接跑 CPU 参考和报告，主测量的结果（包括画质）约 22 小时后出来。口径 B 放在第 3 批之前，因为 B 要和口径 A 用同样的 dtype（fp32 umT5）比较。第 3 批的代码可以在设备测量期间提前写好，到时只剩设备上的验证和重测。</p>
 </section>
 
 <section aria-labelledby="h-reuse">
@@ -228,7 +228,7 @@ footer { border-top: 1px solid var(--rule); padding-top: 16px; font-size: 0.85re
         <tr><td><strong>LTX-2 AoT</strong></td><td colspan="4"><span class="chip run">测量中</span> 第 1 批（双 core）</td><td><span class="chip redo">新测</span></td></tr>
       </tbody>
     </table>
-    <p class="muted" style="margin-top:8px">复用的 native 数字是在较早的 commit 上测的，第 2 批会各补一次运行，核对输出 hash 一致后才算数。第 3 批改成 bf16 后，Qwen 和 Wan 的 native 数字会重测。</p>
+    <p class="muted" style="margin-top:8px">复用的 native 数字是在较早的 commit 上测的，第 2 批会各补一次运行，核对输出 hash 一致后才算数。最后的第 3 批改成 bf16 后，会补充一组 Qwen 和 Wan 的 native 数字，主表仍用 fp32 的结果。</p>
   </div>
 </section>
 
@@ -241,14 +241,14 @@ footer { border-top: 1px solid var(--rule); padding-top: 16px; font-size: 0.85re
       <div><ul><li>加载器改成按要加载的 key 选择 index，加单元测试，再在真实 snapshot 上核对 Gemma 的 626 个 key 都能找到。</li></ul></div></li>
     <li><div class="ph-head"><h3>第 2 批：LTX-2 native、HunyuanVideo / Wan AoT</h3><span class="chip todo">待开始</span><span class="muted num">约 5 h · 设备</span></div>
       <div><ul><li>Qwen native 核对 hash + 画质运行 → LTX-2 native 完整测量（口径 A）→ HunyuanVideo AoT → Wan AoT（双 core、设备上的 bf16 VAE）→ HunyuanVideo / Wan native 核对 hash + 画质运行。</li></ul></div></li>
-    <li><div class="ph-head"><h3>第 3 批：bf16 改动并重测</h3><span class="chip wait">范围待确认</span><span class="muted num">约 2.25–4.75 h · 设备</span></div>
-      <div><ul><li>Qwen 和 Wan 的 VAE 改成 bf16，验证精度（≥ 50 dB）；umT5 是否也改，要先过 F13 的精度检查；然后重测 Qwen 和 Wan 的 native。</li></ul></div></li>
-    <li><div class="ph-head"><h3>第 4 批：CPU 参考</h3><span class="chip todo">待开始</span><span class="muted num">约 14 h · CPU</span></div>
+    <li><div class="ph-head"><h3>CPU 参考</h3><span class="chip todo">待开始</span><span class="muted num">约 14 h · CPU</span></div>
       <div><ul><li>7 份、全部 50 步，按 Qwen ×2 → LTX-2 ×2 → Wan ×1 → HunyuanVideo ×2 的顺序串行。每份跑之前，先核对它的初始噪声和设备运行保存的一致。</li></ul></div></li>
-    <li><div class="ph-head"><h3>第 5 批：画质指标和报告</h3><span class="chip todo">待开始</span><span class="muted num">约 0.5 h · CPU</span></div>
+    <li><div class="ph-head"><h3>画质指标和报告</h3><span class="chip todo">待开始</span><span class="muted num">约 0.5 h · CPU</span></div>
       <div><ul><li>每帧 PSNR（平均和最差）、SSIM，加上潜变量的 rel-L2 和余弦相似度，汇成 4×2 总表，每个数字注明 commit、日期和日志路径。</li></ul></div></li>
-    <li><div class="ph-head"><h3>第 6 批：口径 B</h3><span class="chip todo">最后做</span><span class="muted num">约 0.75 h · 设备</span></div>
-      <div><ul><li>Wan 和 LTX-2 的 native 冷启动，关掉 weight store，从原始 checkpoint 读。</li></ul></div></li>
+    <li><div class="ph-head"><h3>口径 B</h3><span class="chip todo">待开始</span><span class="muted num">约 0.75 h · 设备</span></div>
+      <div><ul><li>Wan 和 LTX-2 的 native 冷启动，关掉 weight store，从原始 checkpoint 读。放在第 3 批之前，和口径 A 用同样的 dtype。</li></ul></div></li>
+    <li><div class="ph-head"><h3>第 3 批：bf16 改动并重测（含 umT5）</h3><span class="chip todo">最后做</span><span class="muted num">约 4.75 h · 设备</span></div>
+      <div><ul><li>Qwen 和 Wan 的 VAE 改成 bf16，验证精度（≥ 50 dB）。</li><li>Wan 的 umT5 改成 bf16 前先过 F13 的精度检查：逐个 prompt 和 fp32 比（含空的 negative prompt，余弦 ≥ 0.995），再跑一次 50 步端到端；不通过就保留 fp32。</li><li>然后重测 Qwen 和 Wan 的 native，并把这部分结果作为补充写进报告。</li></ul></div></li>
   </ol>
 </section>
 
@@ -258,7 +258,7 @@ footer { border-top: 1px solid var(--rule); padding-top: 16px; font-size: 0.85re
     <table>
       <thead><tr><th>事项</th><th>状态</th><th>说明</th></tr></thead>
       <tbody>
-        <tr><td>第 3 批是否包括 umT5</td><td><span class="chip wait">待确认</span></td><td>两个 VAE 改 bf16 只是在调用处传 dtype；umT5 写死成 fp32，要先过 F13 的精度检查，多约 2.5 h。</td></tr>
+        <tr><td>第 3 批包括 umT5</td><td><span class="chip done">已确认</span></td><td>umT5 写死成 fp32，要先过 F13 的精度检查（约 2.5 h），不通过就保留 fp32。第 3 批放在报告之后。</td></tr>
         <tr><td>磁盘</td><td><span class="chip wait">风险</span></td><td>新的编译目录预计 216–246 GB，清理旧目录后才够；剩余空间低于 80 GB 时会停下来报告。</td></tr>
         <tr><td>HunyuanVideo AoT 的初始噪声</td><td><span class="chip wait">风险</span></td><td>AoT 不保存初始噪声，只能在 CPU 上复现（torch 2.9 的 bf16 随机数），没法直接核对，所以只比画面指标。</td></tr>
         <tr><td>HunyuanVideo AoT 修复后变慢</td><td><span class="chip todo">已知</span></td><td>main 上有记录：修复后热端到端从 109.8 s 变成 123.2 s（只跑了一次，issue #110），这次会测到。</td></tr>
