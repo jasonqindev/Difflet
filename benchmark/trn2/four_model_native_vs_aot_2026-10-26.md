@@ -5,7 +5,7 @@
 - **LTX-2 native:** a full cell under cold definition A, measured in phase 2.
 - **Qwen-Image, HunyuanVideo and Wan2.1 native:** numbers reused from earlier cells on this host. Phase 2 confirmed them at the current branch HEAD by bit-identical outputs (plan D10, option A).
 
-PSNR / SSIM: **Qwen-Image and LTX-2 have numbers** (phase 4, two 50-step CPU fp32 references each, sections "Phase 4: Qwen-Image CPU fp32 references" and "Phase 4: LTX-2 CPU fp32 references"). HunyuanVideo and Wan2.1 are **pending CPU references**. Cold e2e is definition A throughout. Definition B (native without its weight store, Wan2.1 and LTX-2 only) comes later (plan phase 6).
+PSNR / SSIM: **Qwen-Image and LTX-2 have numbers** (phase 4, two 50-step CPU fp32 references each, sections "Phase 4: Qwen-Image CPU fp32 references" and "Phase 4: LTX-2 CPU fp32 references", collected with the tool sanity checks and a look at the references in "Quality vs CPU fp32 reference (part 1)"). HunyuanVideo and Wan2.1 are **pending CPU references**. Cold e2e is definition A throughout. Definition B (native without its weight store, Wan2.1 and LTX-2 only) comes later (plan phase 6).
 
 **Device:** trn2.3xlarge: 1 device, 4 NeuronCores (LNC=2, 24 GiB HBM per core), 12 vCPU, 124.8 GiB RAM, one EBS root volume. The host is the same one used for `native_vs_aot_tp4_2026-10-25.md`.
 
@@ -769,7 +769,7 @@ Tooling only, 2026-10-26 16:50–17:50 UTC. No 50-step reference has run yet, an
 
 Reading the numbers:
 - Both matched pairs sit well above the mismatched-noise controls, so the pairing is right and each device run follows its reference's trajectory.
-- The native image keeps its reference's composition (a fox facing right in the same place) but not its pose: the reference fox leaps, the device fox trots. A late-trajectory divergence of that kind costs far more PSNR than it changes the picture. The AoT pair keeps the pose.
+- The native image keeps its reference's composition (a fox facing right in the same place) but not its pose: the reference fox leaps, the device fox trots. A late-trajectory divergence of that kind costs far more PSNR than it changes the picture. The AoT pair keeps the composition and position; its leg pose differs too (the reference fox gallops, the device fox walks; see "Quality vs CPU fp32 reference").
 - Compare with care: the two backends start from different noise, so 21.5 vs 16.1 dB measures how far each run drifts from its own fp32 trajectory. It is not a pixel comparison of the backends. Both runs pass through the same known differences from the reference (below), and a single seed cannot separate them. *Inference:* the text conditioning (padding, below) is the largest common difference.
 - The 20-step AoT figure from the bf16-reduce campaign (24.72 dB, SSIM 0.957, cosine 0.981, same AoT noise `c2d9d8b3…`) is not comparable: more steps leave more room to diverge.
 
@@ -859,6 +859,61 @@ The references ran 2026-10-26 20:15–22:51 UTC and a 20-step cross-check ran 22
 - **DiT:** fp32 here, bf16 at TP4 on both backends.
 - **Decoders:** the video VAE, audio VAE and vocoder run in fp32 here. Both backends decode on the host in bf16.
 
+## Quality vs CPU fp32 reference (part 1: Qwen-Image and LTX-2)
+
+This section collects the quality numbers for the two models that have references, recomputed from scratch on 2026-10-26 after both reference blocks had finished. CPU only, the Neuron device stayed idle. The run was one `systemd-run --user` unit, `quality_part1`, running `B/scripts/quality_part1.sh` (sha256 `9518c2b9…`); all outputs are in `B/quality_part1/`, and `summary.txt` there lists every number with its input hashes.
+
+**Pairs.** Each device q1 output is compared with the 50-step CPU fp32 reference (diffusers, fp32 everywhere, CFG off, the same schedule) that started from **that run's own initial latents**, bit-identical at the first DiT call (sections "Phase 4: … CPU fp32 references"):
+- native device q1 against `ref_native_noise_50`;
+- AoT device q1 against `ref_aot_noise_50`.
+
+The two backends start from different noise, so this measures how far each device run drifts from its own fp32 trajectory. It is **not** a native-vs-AoT pixel comparison.
+
+**Definitions** (`B/scripts/quality_metrics.py`, sha256 `8f6e1b18…`, main's `scripts/quality_vs_reference.py` definitions at `540e5f0`):
+- **Frames:** RGB uint8. PSNR per frame with peak 255; the table gives the mean over frames and the worst frame. SSIM per Wang 2004: 11x11 Gaussian window, sigma 1.5, K1 0.01, K2 0.03, L 255, valid region only, computed per channel and then averaged over R, G and B; mean and worst over frames.
+- **Latents:** relative L2 `||cand − ref|| / ||ref||` and cosine, both in float64, on the packed loop-output latents (Qwen-Image `final.pt` (1,4096,64); LTX-2 `final_video.pt` (1,2310,128) and `final_audio.pt` (1,51,128)). The device latents are bf16 and are upcast exactly.
+- **Preprocessing, and nothing else:**
+  - Qwen-Image: the device `out.png` as written by the CLI (8-bit RGB, 1024x1024) against the reference's fp32 `out.pt` (1,3,1024,1024) turned into uint8 by `uint8(clamp(x·255 + 0.5, 0, 255))`. That is the rule both device CLIs use for their PNG, so the reference passes through the same rounding as the device output.
+  - LTX-2: the device bf16 `out.pt` (1,49,3,480,704) against the reference's fp32 `out.pt`, both turned into uint8 by the same rule, all 49 frames. No mp4 is involved on either side. No resizing, cropping, colour conversion or frame alignment anywhere.
+
+**Tool sanity checks** (all pass)
+
+| check | expected | result | file |
+|---|---|---|---|
+| `--selftest`: closed-form PSNR, SSIM against an independent scipy build, the uint8 rule, latent cosine of scaled and negated copies | all ok | PASS, SSIM equal to 1e-12 | `selftest.txt` |
+| identical pair: Qwen-Image reference `out.pt` and `final.pt` against themselves | inf dB, SSIM 1, rel-L2 0, cosine 1 | inf / 1.000000 / 0 / 1.000000 | `sanity_identical_qwen.json` |
+| identical pair: LTX-2 reference, 49 frames, video and audio latents against themselves | inf dB, SSIM 1, rel-L2 0, cosine 1 | inf (worst inf) / 1.000000 / 0 / 1.000000 | `sanity_identical_ltx2.json` |
+| the reference's `out.png` against its own fp32 `out.pt` (checks the uint8 rule end to end) | inf dB | inf dB, SSIM 1 | `sanity_png_rule_qwen.json` |
+| known pair: Qwen-Image native device PNG against the AoT device PNG; main's unmodified script gave 12.1470 dB, SSIM 0.645899 at the tooling stage | the same | 12.1470 dB, SSIM 0.645899 | `sanity_known_qwen_devices.json` |
+| known pair: the 2026-10-24 LTX-2 AoT device latents (`b426bc92…`) against the 20-step reference (`xcheck_aot_noise_20`) | video cosine 0.9907 (LTX-2 phase 4) | 0.990696 | `sanity_known_ltx2_xcheck20.json` |
+
+The four recomputed pairs equal the earlier `B/<model>/cpu_ref/metrics_*_vs_ref.json` with the same input hashes. The one exception is the last digit of one float64 cosine (Qwen-Image AoT 0.9614398560993154 against …155), from a multi-threaded reduction.
+
+**Results**
+
+| model | pair (same noise) | PSNR mean (worst frame) | SSIM mean (worst frame); R / G / B | latent rel-L2 / cosine | audio latent rel-L2 / cosine |
+|---|---|---:|---:|---:|---:|
+| Qwen-Image 1024x1024 | native device q1 vs `ref_native_noise_50` | **16.11 dB** (1 frame) | **0.823**; 0.813 / 0.828 / 0.829 | 0.522 / **0.872** | n/a |
+| Qwen-Image 1024x1024 | AoT device q1 vs `ref_aot_noise_50` | **21.48 dB** (1 frame) | **0.912**; 0.915 / 0.911 / 0.908 | 0.276 / **0.961** | n/a |
+| LTX-2 480x704x49 | native device q1 vs `ref_native_noise_50` | **18.06 dB** (16.49, frame 27) | **0.811** (0.743, frame 15); 0.820 / 0.808 / 0.807 | video 0.414 / **0.930** | 0.229 / 0.989 |
+| LTX-2 480x704x49 | AoT device q1 vs `ref_aot_noise_50` | **16.21 dB** (15.45, frame 5) | **0.660** (0.555, frame 48); 0.687 / 0.666 / 0.627 | video 0.786 / **0.725** | 0.335 / 0.980 |
+
+Files: `B/quality_part1/{qwen,ltx2}_{native,aot}_vs_ref.json`. Mismatched-noise controls, which score far lower and confirm the pairing, are in the two phase 4 sections (Qwen-Image 11.5–12.0 dB; LTX-2 6.9–9.1 dB).
+
+**What the references themselves show** (I opened the Qwen-Image PNGs and a strip of LTX-2 frames 0, 12, 24, 36 and 48 of each reference, `B/ltx_2/cpu_ref/ref_*_noise_50/strip_0_12_24_36_48.png`, made from the lossless `out.pt` by `B/scripts/ref_strip.py`; AoT `ba3e8b9c…`, native `e059c7dc…`)
+- **Qwen-Image: both references show the prompt.**
+  - AoT noise: a sharp, photographic red fox galloping right across snow, snow-covered trunks behind. The AoT device image has the same fox in the same place and framing, but walking with all four feet down rather than galloping. *(This corrects "the AoT pair keeps the pose" in the Qwen-Image phase 4 section: it keeps the composition and position, not the leg pose.)*
+  - Native noise: a red fox leaping right through a snowy forest; the fox's head is malformed (a smeared muzzle). The native device image has a fox in the same place and direction, trotting, with a clean head.
+- **LTX-2 at g1.0: the CPU fp32 reference is soft and colour-cast too**, so this comes from the workload (guidance 1.0, no CFG), not from the device.
+  - Native noise: on prompt. A small red fox runs across deep snow in a conifer forest, past a large trunk, toward the camera. The whole video has a strong cyan cast, the fox is smeared, and the last frames show checkerboard-like texture on the fox. The native device video matches it closely: the same fox, path, trunk and cyan cast, frame for frame.
+  - AoT noise: only loosely on prompt. Snow-laden pine branches in the foreground against a blue-violet sky, blowing snow, and a blurred red-brown animal that appears from frame 12 onward and is never clearly a fox.
+  - The AoT device video is **worse than its reference**, not just different: the same blue palette, but the frames are dominated by crumpled, foil-like smeared shapes and a large red-brown blob; neither the branches nor the animal of the reference are recognisable. That matches its low latent cosine (0.725) and is the open AoT finding of the LTX-2 phase 4 section.
+
+**Reading the numbers**
+- **Qwen-Image:** AoT 21.5 dB / 0.912, native 16.1 dB / 0.823. Both device images are on prompt and keep their reference's composition. The PSNR gap mostly reflects how late in the trajectory each run diverges (pose), which a single seed cannot attribute to a backend. Both device runs share the same known differences from the reference: the padded, unmasked text conditioning (the largest common difference, *inference*), bf16 text encoder and DiT, and for AoT a compiled bf16 VAE.
+- **LTX-2:** native 18.1 dB / 0.811 with video cosine 0.930 follows its reference closely. AoT 16.2 dB / 0.660 with video cosine 0.725 does not, and its frames show artefacts that its reference does not. Audio latents stay close on both (cosine 0.989 and 0.980).
+- PSNR on these generative outputs is low in absolute terms: a small shift of a fox's legs or of background trees costs several dB. SSIM and latent cosine track what the frames show better here than PSNR.
+
 ## Next
 
 - **Phase 4 (CPU):** the 7 references, 50 steps each, in fp32, Qwen-Image and LTX-2 first. Inputs:
@@ -878,7 +933,7 @@ The references ran 2026-10-26 20:15–22:51 UTC and a 20-step cross-check ran 22
   - **Wan2.1:** one reference serves both backends: noise `03b6284b…` (raw `16aeaed7…`).
     - Native frames: `B/wan2_1/native_tp4_hashcheck/q1/out.pt`.
     - AoT frames: use the fp32 host decode `B/wan2_1/aot_main_tp4_twocore/q1_host_vae/host_fp32_frames.pt`, which is the A2 placement, because the device-VAE frames are corrupted.
-- **Phase 5:** PSNR / SSIM fill the last column of the summary table.
+- **Phase 5:** PSNR / SSIM fill the last column of the summary table. Part 1 (Qwen-Image and LTX-2) is **done**: section "Quality vs CPU fp32 reference (part 1)". Part 2 (HunyuanVideo and Wan2.1) waits for their references.
 - **Phase 6:** definition B, native cold without the weight store, for Wan2.1 and LTX-2.
 - **Follow-up on main:** the compiled bf16 Wan VAE (`trainium/wan/vae.py`) corrupts frames on the device. Wan2.2 on 2026-10-24 shows the same kind of corruption.
 
