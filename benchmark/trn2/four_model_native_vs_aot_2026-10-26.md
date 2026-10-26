@@ -636,6 +636,101 @@ Phase 2 found no Difflet bug on the native branch, so it produced no code commit
 
 **Disk:** the phase-2 roots take 60 GB (HunyuanVideo AoT), 40 GB (Wan2.1 AoT) and 22 GB (LTX-2 native). The native root copies take 27 GB (Wan2.1), 76 MB (HunyuanVideo) and 41 MB (Qwen-Image). `/` has 120 GB free after phase 2.
 
+## Phase 4 preparation: CPU reference tooling for Qwen-Image and LTX-2
+
+Tooling only, 2026-10-26 16:50–17:50 UTC. No 50-step reference has run yet, and the Neuron device stayed idle throughout.
+
+**Scripts** (in `B/scripts`, outside the repo; main's originals are kept unmodified as `*.main-540e5f0.py`)
+- `cpu_ref_qwen.py` and `cpu_ref_ltx2.py`, adapted from main's `scripts/cpu_fp32_reference.py`:
+  - diffusers' own `QwenImagePipeline` / `LTX2Pipeline`, all components in fp32 on the CPU, at the model's pinned snapshot;
+  - the prompt is encoded with only the text encoder loaded, then the encoder is freed (as on main);
+  - the run starts from a device q1 dump: Qwen-Image through diffusers' `latents=` argument, LTX-2 by replacing `prepare_latents` / `prepare_audio_latents` (as on main; diffusers' own path would re-normalize the audio latents);
+  - `--steps` defaults to 50.
+- `quality_metrics.py`, adapted from main's `scripts/quality_vs_reference.py`. The metric definitions are main's (see Metrics below); it also reads lossless `.pt` frames and refuses mp4.
+- `cpu_ref_common.py` and `cpu_only.py` hold shared helpers. `job_cpu_ref.sh` runs one reference as a `systemd-run --user` unit, under `/usr/bin/time -v`.
+- Prepared but not started: `job_cpu_ref_queue_qwen_ltx2.sh` (the four 50-step references, one after the other) and `metrics_qwen_ltx2.sh` (the four comparisons).
+
+**Environment**
+- **Venv:** `/home/ubuntu/venvs/difflet-neuron`: torch 2.9.1, diffusers 0.38.0, transformers 4.57.6. The native venv has the same diffusers (0.38.0, torch 2.14).
+  - Every reference uses this one venv, so a model's two references differ only in their noise.
+  - It is also the venv of the 2026-10-24 20-step references.
+- **Threads:** torch's default, 6 intra-op and 6 inter-op threads. The host has 6 physical cores (12 vCPU, Xeon 8488C).
+- **No Neuron in the process:**
+  - In this venv, diffusers, accelerate and transformers import `torch_xla` when it is installed. That initializes `torch_neuronx`, and the diffusers pipelines then call `xm.mark_step()` every step. The 2026-10-24 references ran that way.
+  - In the native venv, `import torch` autoloads `torch_neuronx`.
+  - `cpu_only.py` prevents both: it sets `USE_TORCH_XLA=0` and `TORCH_DEVICE_BACKEND_AUTOLOAD=0` before torch is imported, sets diffusers' `_torch_xla_available` to False, and refuses every import of the Neuron and XLA packages.
+  - Each run records `cpu_only.report()`: Neuron modules loaded, open `/dev/neuron*` fds. A non-empty report fails the run.
+  - In every smoke: no such module was loaded, no such fd was open, and the pipelines' `XLA_AVAILABLE` was False.
+
+**Guidance, mirrored from the device runs**
+- **Qwen-Image:** true CFG was off on both backends.
+  - Both q1 runs passed `--guidance-scale 4.0` and no `--true-cfg-scale`.
+  - Native runs true CFG only with `--true-cfg-scale > 1` (`_true_cfg_scale`). AoT on main has no negative branch.
+  - The 4.0 is dropped by the DiT on both backends (`guidance_embeds` false).
+  - The reference therefore passes `guidance_scale=4.0`, which diffusers ignores and logs, and `true_cfg_scale=1.0` with no negative prompt, so `do_true_cfg` is False.
+- **LTX-2:** CFG was off on both backends at g1.0.
+  - Native's `do_cfg` and AoT's `do_cfg` both require guidance > 1.
+  - In diffusers, CFG needs `guidance_scale > 1` or `audio_guidance_scale > 1`, and the audio scale defaults to the video one.
+- Both scripts count the DiT calls and fail unless there is exactly one per step.
+
+**Injection is bit-exact**
+- A forward pre-hook captures the transformer's first `hidden_states` (and, for LTX-2, `audio_hidden_states`): what actually enters the loop.
+- That tensor must equal the fp32 upcast of the dump bit for bit (bf16 to fp32 is exact), and it must round back to the dump's bf16 bits.
+- It held in every smoke, for both noises of both models:
+
+  | dump (device q1) | dtype, shape | file / raw sha256 | first DiT input |
+  |---|---|---|---|
+  | Qwen AoT `initial.pt` | bf16 (1,4096,64) | `c2d9d8b3…` / `4dfaec64…` | bit-identical (`smoke_aot_cut2`) |
+  | Qwen native `initial.pt` | bf16 (1,4096,64) | `95a4306b…` / `750e9824…` | bit-identical (`smoke_native_full2`, `smoke_native_cut2_final`) |
+  | LTX-2 AoT `initial_video` / `initial_audio` | bf16 (1,2310,128) / (1,51,128) | `4458e4cf…` / `8e52babb…` (files) | both bit-identical (`smoke_aot_cut2`) |
+  | LTX-2 native `initial_video` / `initial_audio` | bf16 (1,2310,128) / (1,51,128) | `16e09464…` / `411c72d9…` (files); raw `55b90133…` / `24900b1b…` | both bit-identical (`smoke_native_full2`, `smoke_native_cut2_final`) |
+
+**Outputs** (in `B/<model>/cpu_ref/<name>/`)
+- **Final latents:** the packed fp32 loop outputs, at the same point as the device dumps.
+  - Qwen-Image: `final.pt` (1,4096,64), checked equal to the step callback's last latents.
+  - LTX-2: `final_video.pt` (1,2310,128) and `final_audio.pt` (1,51,128), captured where diffusers unpacks and denormalizes them. Main recorded video only.
+- **Decoded output, lossless:**
+  - Qwen-Image: `out.pt`, fp32 (1,3,1024,1024) in [0,1], and `out.png` written from it with the device PNG rule;
+  - LTX-2: `out.pt`, fp32 (1,49,3,480,704) in [0,1], the device `out.pt` layout. Also `audio.pt` (the vocoder waveform) and `mid.png`.
+- **`reference.json`:** argv, versions, threads, script hashes, input and output hashes, the schedule, per-step and per-forward times, the time of each phase, VmRSS / RssAnon / RssFile peaks with the host's lowest MemAvailable, and the injection and CPU-only checks.
+
+**Metrics (`quality_metrics.py`)**
+- Latents: rel-L2 and cosine in float64 (main's definitions).
+- Frames: RGB uint8, per-frame PSNR (mean and worst), and SSIM per Wang 2004: 11x11 Gaussian window, σ 1.5, K1 0.01, K2 0.03, valid region, per channel then averaged. These are main's definitions. Worst SSIM and per-channel SSIM are added.
+- **Preprocessing:** float frames become uint8 by one rule, `uint8(clamp(x·255 + 0.5, 0, 255))` in float32. bf16 is upcast exactly first.
+  - This is the rule of both device CLIs' PNG writers (torchvision `save_image` on AoT; native `_save_image_pil`, which reproduces it pixel for pixel).
+  - The device PNGs (Qwen-Image) are read as they are.
+- **Self-test passes:**
+  - PSNR matches the closed form;
+  - SSIM matches an independent scipy build to 1e-12;
+  - main's script gives identical numbers on the Qwen device PNGs (12.1470 dB, SSIM 0.645899);
+  - native vs AoT device latents for LTX-2 give cosine 0.363 / 0.641, as reported above.
+
+**Smoke runs** (real shapes, 2 steps; `--cut-layers 2` builds a 2-block DiT)
+
+| run | DiT | load (text encoder + encode / DiT and decoders) | step | decode | peak VmRSS | wall |
+|---|---|---|---|---|---|---|
+| Qwen `smoke_native_full2` | 60 blocks, 20.43 B params | 4.2 s (warm cache) / 301.2 s | 78.9, 79.0 s | 19.0 s | 85.2 GiB | 486 s |
+| Qwen `smoke_aot_cut2` | 2 blocks | 127.3 s (cold) / 13.6 s | 2.8 s | 19.1 s | 33.1 GiB | 169 s |
+| LTX-2 `smoke_native_full2` | 48 blocks, 18.88 B params | 29.7 s / 290.6 s | 79.6, 79.5 s (forward) | 26.4 s | 117.3 GiB | 515 s |
+| LTX-2 `smoke_aot_cut2` | 2 blocks | 362 s (cold Gemma-3 fp32 read) / 59.3 s | 3.4 s | 25.3 s | 48.0 GiB | 462 s |
+
+- **LTX-2 memory:** the 117.3 GiB VmRSS includes reclaimable file-backed pages.
+  - An extra 1-step run (`smoke_aot_full1.failed-1step`) measured, after the DiT load: RssAnon 82.0 GiB, RssFile 20.4 GiB, host MemAvailable 39.9 GiB.
+  - Gemma-3's fp32 checkpoint is mmapped as it is: 44 GiB RssFile during the encode, 1.6 GiB anonymous.
+  - `job_cpu_ref.sh` refuses to start below 112 GiB MemAvailable and refuses a second concurrent reference.
+- **That 1-step run failed** in diffusers' scheduler: `FlowMatchEulerDiscreteScheduler` with `shift_terminal` divides by zero on a one-sigma schedule (IndexError in `index_for_timestep`). Both scripts now refuse `--steps < 2`.
+
+**Estimated 50-step wall time:**
+- **Qwen-Image:** about 1.2–1.3 h each. Load about 7 min cold, plus 50 x 79 s, plus a 19 s decode. The 2026-10-24 20-step reference had six slow early steps (117–133 s), which would add about 4 min.
+- **LTX-2:** about 1.3 h each. Encode about 6 min cold, DiT load about 5 min, 50 x 79.5 s, and a 26 s decode.
+- **The four references in sequence:** about 5–5.5 h.
+
+**Known differences, for the report:**
+- **Qwen-Image text:** diffusers encodes the real prompt length (17 tokens) and drops the all-ones mask. Both device runs zero-pad to `TEXT_SEQ_LEN` and attend the padding unmasked.
+- **Text encoders:** fp32 here, at the device runs' own dtypes and placements there (plan D2, D8; for example Qwen2.5-VL in bf16 at TP4 on the AoT device, Gemma-3 in bf16 on the native device).
+- **VAEs:** fp32 diffusers VAEs here. On the device, Qwen-Image decodes with an fp32 VAE on native and a compiled bf16 VAE on AoT. LTX-2 decodes on the host on both backends (in bf16 on native).
+
 ## Next
 
 - **Phase 4 (CPU):** the 7 references, 50 steps each, in fp32, Qwen-Image and LTX-2 first. Inputs:
@@ -645,7 +740,8 @@ Phase 2 found no Difflet bug on the native branch, so it produced no code commit
   - **LTX-2:**
     - AoT noise: `B/ltx_2/aot_main_tp4_twocore/q1`;
     - native noise: `B/ltx_2/native_tp4/q1`, `initial_video` / `initial_audio` raw `55b90133…` / `24900b1b…`.
-    - The reference needs a lossless frames output (plan D9).
+    - The reference needs a lossless frames output (plan D9): done, `cpu_ref_ltx2.py` writes `out.pt`.
+  - Qwen-Image and LTX-2 are ready to run: `B/scripts/job_cpu_ref_queue_qwen_ltx2.sh` as one systemd unit (about 5–5.5 h), then `metrics_qwen_ltx2.sh`.
   - **HunyuanVideo:**
     - native noise: fp32, `B/hunyuan_video/native_tp4_hashcheck/q1/initial.pt`;
     - AoT noise: bf16, `B/hunyuan_video/aot_main_tp4/q1/initial.pt`.
