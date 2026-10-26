@@ -118,7 +118,7 @@ footer { border-top: 1px solid var(--rule); padding-top: 16px; font-size: 0.85re
 
 <section aria-label="当前状态">
   <div class="status">
-    <div class="card"><span class="chip run">运行中</span><p class="big">第 2c 批</p><p class="muted">LTX-2 native 完整测量（设备）。第 1、2a、2b 批已完成，结果见下方“测量结果”。</p></div>
+    <div class="card"><span class="chip run">运行中</span><p class="big">CPU 参考（一）</p><p class="muted">Qwen ×2、LTX-2 ×2，加上这两个模型的 PSNR / SSIM。设备上的主测量（第 1、2 批）已全部完成，见下方总表。</p></div>
     <div class="card"><span class="chip done">已完成</span><p class="big">F12</p><p class="muted">LTX-2 Gemma 加载问题已修复（05614a2），独立复查通过：在真实 snapshot 上 Gemma 的 626 个 key 全部能找到</p></div>
     <div class="card"><span class="chip reuse">可复用</span><p class="big num">12 / 48</p><p class="muted">格数据可以复用（HunyuanVideo、Qwen、Wan 的 native 计时）</p></div>
     <div class="card"><span class="chip todo">预计</span><p class="big num">≈ 28 h</p><p class="muted">主计划的总时间（设备约 13 h，CPU 参考约 14 h），约 22 h 出画质结果和报告；另有最后一步 VAE 分区域编译约 3 h，不急</p></div>
@@ -180,11 +180,11 @@ footer { border-top: 1px solid var(--rule); padding-top: 16px; font-size: 0.85re
       <div class="lane"><div class="ll">设备<small>一次一个，TP4 占满 4 个 core</small></div>
         <div class="track">
           <div class="bar dev" tabindex="0" data-s="0" data-d="2.5" data-tip="第 1 批（已完成，实际约 2.3 h）：准备 + Qwen-Image AoT + LTX-2 AoT">第 1 批 ✓</div>
-          <div class="bar dev" tabindex="0" data-s="2.5" data-d="5" data-tip="第 2 批（分三段）：2a Qwen native 核对 + HunyuanVideo AoT（已完成，约 2.1 h）→ 2b Wan AoT + HunyuanVideo / Wan native 核对（已完成，约 3 h，VAE 编译 1.5 h）→ 2c LTX-2 native 完整测量（约 1 h，运行中）">第 2 批：2a ✓ → 2b ✓ → 2c</div>
+          <div class="bar dev" tabindex="0" data-s="2.5" data-d="5" data-tip="第 2 批（已完成）：2a Qwen native 核对 + HunyuanVideo AoT（约 2.1 h）→ 2b Wan AoT + HunyuanVideo / Wan native 核对（约 3 h，VAE 编译 1.5 h）→ 2c LTX-2 native 完整测量（约 1 h）">第 2 批 ✓</div>
           <div class="bar dev" tabindex="0" data-s="22" data-d="0.75" data-tip="口径 B：Wan 和 LTX-2 的 native 冷启动，关掉 weight store（约 40 min）。放在第 3 批之前，和口径 A 用同样的 dtype">B</div>
           <div class="bar dev" tabindex="0" data-s="22.75" data-d="4.75" data-tip="第 3 批：Qwen / Wan 的 VAE 改 bf16 后验证精度（约 1 h）、umT5 bf16 精度检查 F13（约 2.5 h）、Qwen 和 Wan native 重测（约 1.25 h）">第 3 批：bf16（含 umT5）</div>
           <div class="bar ghost" tabindex="0" data-s="27.5" data-d="3" data-tip="最后一步（不急）：Wan / Qwen 的 native VAE 改成分区域编译，照 HunyuanVideo F1a 的做法，然后补测 Wan 和 Qwen native 的端到端">VAE 分区域编译</div>
-          <div class="now" style="left:22.7%" title="现在"></div>
+          <div class="now" style="left:25%" title="现在"></div>
         </div></div>
       <div class="lane"><div class="ll">CPU 重任务<small>占满 CPU、内存和磁盘</small></div>
         <div class="track">
@@ -225,7 +225,7 @@ footer { border-top: 1px solid var(--rule); padding-top: 16px; font-size: 0.85re
         <tr><td><strong>Qwen-Image AoT</strong></td><td colspan="4"><span class="chip done">已测</span> 第 1 批，见“测量结果”</td><td><span class="chip redo">新测</span></td></tr>
         <tr><td><strong>Wan2.1 native</strong></td><td><span class="chip reuse">复用</span> <span class="num">1063.6 ms</span></td><td><span class="chip reuse">复用</span> <span class="num">128.5 s</span></td><td><span class="chip reuse">复用（A）</span> <span class="num">542.7 s</span></td><td><span class="chip reuse">复用</span> <span class="num">600.3 s</span></td><td><span class="chip redo">新测</span></td></tr>
         <tr><td><strong>Wan2.1 AoT</strong></td><td colspan="4"><span class="chip done">已测</span> 第 2b 批，见“测量结果”（设备 VAE 画面损坏，有效数字用主机 VAE）</td><td><span class="chip redo">新测</span></td></tr>
-        <tr><td><strong>LTX-2 native</strong></td><td colspan="4"><span class="chip redo">重测</span> 旧数字是另一台机器、旧工具链测的（需要先完成 F12）</td><td><span class="chip redo">新测</span></td></tr>
+        <tr><td><strong>LTX-2 native</strong></td><td colspan="4"><span class="chip done">已测</span> 第 2c 批，见“测量结果”</td><td><span class="chip redo">新测</span></td></tr>
         <tr><td><strong>LTX-2 AoT</strong></td><td colspan="4"><span class="chip done">已测</span> 第 1 批（双 core），见“测量结果”</td><td><span class="chip redo">新测</span></td></tr>
       </tbody>
     </table>
@@ -265,7 +265,7 @@ footer { border-top: 1px solid var(--rule); padding-top: 16px; font-size: 0.85re
         <tr><td><strong>Qwen-Image AoT</strong></td><td class="num">360.6 ms<br><span class="muted">p10 360.2 / p90 361.8</span></td><td class="num">73.7 s<br><span class="muted">74.2 / 76.1 / 71.0</span></td><td class="num">515.6 s<br><span class="muted">文本 140.2 · DiT 加载 329.1 · 去噪 18.4 · VAE 15.2</span></td><td class="num">1209.9 s</td><td class="num">10.10 GiB</td><td><span class="chip todo">待 CPU 参考</span></td><td class="num muted">10-26 · 第 1 批</td></tr>
         <tr><td><strong>Qwen-Image native</strong></td><td class="num">359.0 ms</td><td class="num">82.3 s</td><td class="num">502.0 s</td><td class="num">187.0 s</td><td class="num">10.81 GiB</td><td><span class="chip todo">待 CPU 参考</span></td><td class="num muted">10-25 复用；第 2a 批在当前代码上重跑，输出逐位一致 ✓</td></tr>
         <tr><td><strong>LTX-2 AoT</strong>（双 core）</td><td class="num">400.1 ms<br><span class="muted">p10 398.1 / p90 400.9</span></td><td class="num">66.6 s<br><span class="muted">66.0 / 68.0 / 65.6</span></td><td class="num">778.1 s<br><span class="muted">主机 pipeline 加载 373.8 · DiT 加载 309.7 · 编码 30.7 · 去噪 20.0 · 解码 15.2</span></td><td class="num">1052.2 s</td><td class="num">9.81 GiB</td><td><span class="chip todo">待 CPU 参考</span></td><td class="num muted">10-26 · 第 1 批</td></tr>
-        <tr><td><strong>LTX-2 native</strong></td><td colspan="6"><span class="chip todo">排队中</span> 第 2c 批</td><td class="muted">—</td></tr>
+        <tr><td><strong>LTX-2 native</strong>（双 core）</td><td class="num">350.5 ms<br><span class="muted">p10 349.4 / p90 352.0</span></td><td class="num">92.5 s<br><span class="muted">94.4 / 92.2 / 90.8</span></td><td class="num">594.8 s（A）<br><span class="muted">DiT 加载 310.2 · Gemma 从 store 读 180.2 · 编码 25.3 · 去噪 17.6 · 主机解码 25.4</span></td><td class="num">327.6 s</td><td class="num">16.52 GiB<br><span class="muted">Gemma 也在设备上</span></td><td><span class="chip todo">待 CPU 参考</span></td><td class="num muted">10-26 · 第 2c 批</td></tr>
         <tr><td><strong>HunyuanVideo AoT</strong>（双 core）</td><td class="num">801.8 ms<br><span class="muted">p10 800.9 / p90 802.5</span></td><td class="num">133.0 s<br><span class="muted">134.7 / 131.7 / 132.6</span></td><td class="num">617.5 s<br><span class="muted">CLIP 26.4 · Llama 134.6 · DiT+VAE 加载 385.0 · 去噪 40.3 · 解码 17.1</span></td><td class="num">4526.7 s<br><span class="muted">VAE 编译 3679 s（81%）</span></td><td class="num">15.53 GiB</td><td><span class="chip todo">待 CPU 参考</span></td><td class="num muted">10-26 · 第 2a 批</td></tr>
         <tr><td><strong>HunyuanVideo native</strong></td><td class="num">808.2 ms</td><td class="num">126.7 s</td><td class="num">457.8 s</td><td class="num">274.5 s</td><td class="num">17.95 GiB（rank 0）</td><td><span class="chip todo">待 CPU 参考</span></td><td class="num muted">10-26 复用；第 2b 批在当前代码上重跑，输出逐位一致 ✓</td></tr>
         <tr><td><strong>Wan2.1 AoT</strong>（双 core）</td><td class="num">956.4 ms<br><span class="muted">p10 955.3 / p90 958.0</span></td><td class="num">123.2 s<br><span class="muted">主机 fp32 VAE（有效）；设备 bf16 VAE 是 106.0 s，但画面损坏</span></td><td class="num">449.4 s<br><span class="muted">主机 fp32 VAE；设备 bf16 VAE 是 432.3 s（画面损坏）</span></td><td class="num">5935.7 s<br><span class="muted">VAE 编译 5486 s；DiT 阶段 430.5 s</span></td><td class="num">10.34 GiB</td><td><span class="chip redo">设备 VAE 12.4 dB</span></td><td class="num muted">10-26 · 第 2b 批</td></tr>
@@ -273,6 +273,29 @@ footer { border-top: 1px solid var(--rule); padding-top: 16px; font-size: 0.85re
       </tbody>
     </table>
     <div style="display:grid;gap:6px;margin-top:10px">
+      <p><strong>设备测量总结：native 相对 AoT</strong>（(native − AoT) / AoT，负数表示 native 更快或更小；Wan 的 AoT 端到端用主机 VAE 那组）</p>
+      <div class="scroll"><table>
+        <thead><tr><th>模型</th><th>DiT 每步</th><th>热端到端</th><th>冷端到端（A）</th><th>编译</th><th>峰值 HBM</th></tr></thead>
+        <tbody>
+          <tr><td>HunyuanVideo 1.0</td><td class="num">+0.8%</td><td class="num"><strong>−4.7%</strong></td><td class="num"><strong>−25.9%</strong></td><td class="num"><strong>−93.9%</strong></td><td class="num">解码 core +15.6%，其他 core −16.4%</td></tr>
+          <tr><td>Qwen-Image</td><td class="num">−0.4%</td><td class="num">+11.6%</td><td class="num">−2.6%</td><td class="num"><strong>−84.5%</strong></td><td class="num">+7.0%</td></tr>
+          <tr><td>Wan2.1 14B</td><td class="num">+11.2%</td><td class="num">+4.4%</td><td class="num">+20.8%</td><td class="num"><strong>−89.9%</strong>（只比 DiT 阶段则 +39.5%）</td><td class="num">+46.5%</td></tr>
+          <tr><td>LTX-2</td><td class="num"><strong>−12.4%</strong></td><td class="num">+38.9%</td><td class="num"><strong>−23.6%</strong></td><td class="num"><strong>−68.9%</strong></td><td class="num">+68.4%（Gemma 在设备上）</td></tr>
+        </tbody>
+      </table></div>
+      <ul style="margin:0;padding-left:1.2em">
+        <li><strong>DiT 每步：</strong>bf16 修复后，AoT 和 native 在 HunyuanVideo、Qwen 上基本持平；LTX-2 native 快 12%；Wan native 慢 11%（原因仍待查，F6a）。</li>
+        <li><strong>编译：</strong>native 在四个模型上都快得多（69–94%），主要因为 AoT 要整图编译 VAE、要预切分权重。</li>
+        <li><strong>冷端到端：</strong>native 在 HunyuanVideo、LTX-2 上明显更快，Qwen 持平；Wan 慢 21%，主要因为 native 的 umT5 用 fp32、每次冷启动都要读 22.7 GB。</li>
+        <li><strong>热端到端：</strong>只有 HunyuanVideo native 更快（F1/F2 的效果）。其他三个模型 native 都更慢，主要是每次 torchrun 启动的固定开销，以及 eager VAE / 主机解码。LTX-2 差距最大（+39%）。</li>
+      </ul>
+      <p><strong>第 2c 批要点（LTX-2 native）：</strong></p>
+      <ul style="margin:0;padding-left:1.2em">
+        <li>F12 在设备上确认有效：Gemma 的 626 个权重全部找到，首次编译写了 bf16 weight store（每个 core 5.88 GB），冷启动从 store 读，约 180 s。</li>
+        <li>双 core 已确认：5 个含 attention 的 NEFF 全部拆成 lnc0 / lnc1 两个子图。DiT 每步 350.5 ms，和 10-20 在另一台机器上测的 350.7 ms 一样。</li>
+        <li>native 和 AoT 的初始噪声不同（torch 2.14 和 2.9 抽出的 bf16 随机数不同），画面也就不同，所以画质只能分别和各自噪声的 CPU 参考比。</li>
+        <li>画面：雪林里的红色狐狸状动物，比 AoT 的更容易认出来，但模糊、雪地偏青色；guidance 1 没有 CFG，属于预期，等 CPU 参考出来再判断。</li>
+      </ul>
       <p><strong>第 1 批要点：</strong></p>
       <ul style="margin:0;padding-left:1.2em">
         <li>两个模型都在最新 main（540e5f0）上跑，每个进程都确认加载的是 aot-main 的代码；HLO 里 DiT 的 all-reduce 全是 bf16。</li>
@@ -314,6 +337,10 @@ footer { border-top: 1px solid var(--rule); padding-top: 16px; font-size: 0.85re
     <table>
       <thead><tr><th>时间</th><th>问题</th><th>采用的做法</th><th>原因</th></tr></thead>
       <tbody id="log-body">
+        <tr><td class="num">10-26</td><td>CPU 参考要不要再加一组 CPU bf16 对照（看 bf16 本身带来多少误差）</td><td>不加</td><td>你确认的范围是 7 份 50 步的 fp32 参考；加 bf16 对照会让 CPU 时间多 35–40%。需要的话之后单独补。</td></tr>
+        <tr><td class="num">10-26</td><td>Wan AoT 的编译时间要不要算上设备 VAE 的 1.5 h（这个 VAE 画面是坏的）</td><td>两个都报：总编译 5935.7 s，以及只算 DiT 阶段的 430.5 s</td><td>如实反映 main 默认要付出的编译时间，同时给出可比的部分。</td></tr>
+        <tr><td class="num">10-26</td><td>native 有的 core 峰值 HBM 比其他 core 高（解码或 VAE 所在的 core）</td><td>分开报两个数</td><td>解码所在的 core 和只跑 DiT 的 core 分别和 AoT 比，才不会误导。</td></tr>
+        <tr><td class="num">10-26</td><td>LTX-2 native 的热启动运行前没有重新清 page cache 再预读</td><td>冷启动之后直接跑热启动，和 AoT 的测法一样</td><td>冷启动已经把所有要读的文件读进 page cache；重新清理反而会把 venv 也清掉，影响启动时间。</td></tr>
         <tr><td class="num">10-26</td><td>AoT Wan 的设备 bf16 VAE 画面损坏（12.4 dB），用它测的端到端不能代表正确输出</td><td>加测一组用主机 fp32 VAE（<span class="mono">--host-vae</span>）的冷启动和热启动，作为 AoT Wan 的有效数字；设备 VAE 那组照样记录，但标注画面损坏</td><td>同一个编译目录，不用重新编译，只多约 17 分钟；也和 10-25 的 AoT 测法一致。不改 main 的代码；这个 VAE 问题作为 main 上的问题记录下来。</td></tr>
         <tr><td class="num">10-26</td><td>编译时的双 core 设置是不是 VAE 损坏的原因，没单独测</td><td>不测，标注为推断</td><td>直接测要再编译 1.5 小时。VAE 的 HLO 里没有 NKI 调用，只有 attention 会读这个变量；10-24 的 Wan2.2 没设这个变量，也出现过同样的损坏。</td></tr>
         <tr><td class="num">10-26</td><td>main 的 Wan CLI 默认不开双 core attention</td><td>编译和每次运行都设 <span class="mono">NEURON_RT_VIRTUAL_CORE_SIZE=2</span>，用全新的编译目录</td><td>按计划的方法；已确认这个变量会传到 DiT 和 VAE 两个阶段，编译出的 attention 全部是 grid 2。</td></tr>
