@@ -226,3 +226,9 @@ Only Wan2.1 (DiT: store 217 s vs fp32 checkpoint 435 s) and LTX-2 (Gemma-3: stor
 6. Disk: option A approved: delete the pre-fix AoT roots (`bench-2026-10-25/roots/qwen_aot_tp4`, the two Wan AoT roots, HunyuanVideo `aot_tp4`) and their stale `_shared_weights` entries.
 7. Measurement tooling lives outside the repo (bench dir), approved.
 8. F11 deferred.
+
+## Decisions 2026-10-26, second round (user)
+
+- **3 (bf16 exceptions):** keep fp32 (native Wan umT5, Wan VAE, Qwen VAE) for the device runs. After all device runs (A + AoT, four models) are done, change them to bf16 and re-test, then run the CPU references. Scope to confirm: the two VAEs (call-site dtype or a `--vae-dtype` flag) and umT5 (behind F13's accuracy gate).
+- **4 (LTX-2 Gemma index):** option 2, fix the code (F12) before the LTX-2 native runs. Done now on CPU, in parallel with the phase-1 AoT device runs (unit tests run only while the device is idle).
+- **Revised order:** phase 1 (running: prep, Qwen-Image AoT, LTX-2 AoT) and F12 in parallel → phase 2 device: native Qwen-Image hash/quality run, LTX-2 native full cell (A), HunyuanVideo AoT, Wan2.1 AoT, native HunyuanVideo/Wan hash/quality runs → phase 3: bf16 changes and native re-tests (Qwen-Image, Wan2.1) → phase 4: CPU references (7 × 50 steps, Qwen-Image and LTX-2 first) → phase 5: PSNR/SSIM and the report → phase 6: B (native cold without the weight store, Wan2.1 and LTX-2).
