@@ -5,7 +5,7 @@
 - **LTX-2 native:** a full cell under cold definition A, measured in phase 2.
 - **Qwen-Image, HunyuanVideo and Wan2.1 native:** numbers reused from earlier cells on this host. Phase 2 confirmed them at the current branch HEAD by bit-identical outputs (plan D10, option A).
 
-PSNR / SSIM are **pending CPU references**: the 50-step CPU fp32 references (plan phase 4) have not run yet. Cold e2e is definition A throughout. Definition B (native without its weight store, Wan2.1 and LTX-2 only) comes later (plan phase 6).
+PSNR / SSIM: **Qwen-Image has numbers** (phase 4, both 50-step CPU fp32 references, section "Phase 4: Qwen-Image CPU fp32 references"). The other three models are **pending CPU references**. Cold e2e is definition A throughout. Definition B (native without its weight store, Wan2.1 and LTX-2 only) comes later (plan phase 6).
 
 **Device:** trn2.3xlarge: 1 device, 4 NeuronCores (LNC=2, 24 GiB HBM per core), 12 vCPU, 124.8 GiB RAM, one EBS root volume. The host is the same one used for `native_vs_aot_tp4_2026-10-25.md`.
 
@@ -30,13 +30,14 @@ All values were re-read from the run records (`summary.json`, `stats_gen1-3.txt`
 - **Cold e2e A:** page cache dropped. Compile-time weight artifacts are allowed: the native weight store and the AoT pre-shards.
 - **Compile:** a cold `difflet compile` on a fresh root, with the checkpoint already in the page cache.
 - **Peak HBM:** neuron-monitor's per-core peak.
+- **PSNR / SSIM:** the device q1 output against a 50-step CPU fp32 reference (diffusers) started from that backend's own initial latents. RGB uint8, SSIM per Wang 2004; latent cosine on the final packed latents. Not a native-vs-AoT comparison: each backend has its own noise and its own reference.
 
 | model | backend | DiT step | warm e2e | cold e2e A | compile | peak HBM per core | PSNR / SSIM | date, commit, evidence |
 |---|---|---:|---:|---:|---:|---|---|---|
 | HunyuanVideo 1.0, 320x512x61, g6.0 | native | 808.2 ms | 126.7 s | 457.8 s | 274.5 s | 17.95 GiB on the decoder core, 12.98 on the other three | pending CPU references | *reused*: 2026-10-25/26 at `eadddec`, `/home/ubuntu/bench-2026-10-26/hunyuan_video/s4_tp4/`. Confirmed by hash on 2026-10-26 at `4f5d46a`: `B/hunyuan_video/native_tp4_hashcheck/` |
 | | AoT | 801.8 ms | 133.0 s | 617.5 s | 4526.7 s | 15.53 GiB | pending CPU references | 2026-10-26 at main `540e5f0`: `B/hunyuan_video/aot_main_tp4/` |
-| Qwen-Image, 1024x1024, g4.0 | native | 359.0 ms | 82.3 s | 502.0 s | 187.0 s | 10.81 GiB on the DiT cores, 13.85 on the VAE core | pending CPU references | *reused*: 2026-10-25 at `4f6e1de`, `/home/ubuntu/bench-2026-10-25/qwen_image/native_tp4/`. Confirmed by hash on 2026-10-26 at `a87d89c`: `B/qwen_image/native_tp4_hashcheck/` |
-| | AoT | 360.6 ms | 73.7 s | 515.6 s | 1209.9 s | 10.10 GiB | pending CPU references | 2026-10-26 at main `540e5f0`: `B/qwen_image/aot_main_tp4/` |
+| Qwen-Image, 1024x1024, g4.0 | native | 359.0 ms | 82.3 s | 502.0 s | 187.0 s | 10.81 GiB on the DiT cores, 13.85 on the VAE core | 16.11 dB / 0.823 (latent cosine 0.872), against the CPU fp32 reference from native's noise | *reused*: 2026-10-25 at `4f6e1de`, `/home/ubuntu/bench-2026-10-25/qwen_image/native_tp4/`. Confirmed by hash on 2026-10-26 at `a87d89c`: `B/qwen_image/native_tp4_hashcheck/` |
+| | AoT | 360.6 ms | 73.7 s | 515.6 s | 1209.9 s | 10.10 GiB | 21.48 dB / 0.912 (latent cosine 0.961), against the CPU fp32 reference from AoT's noise | 2026-10-26 at main `540e5f0`: `B/qwen_image/aot_main_tp4/` |
 | Wan2.1 14B, 480x832x9, g5.0 (CFG) | native | 1063.6 ms | 128.5 s | 542.7 s (weight store) | 600.3 s | 15.15 GiB on the DiT cores, 18.40 on the VAE core | pending CPU references | *reused*: 2026-10-25 at `8b2408c`, `/home/ubuntu/bench-2026-10-25/wan2_1/native_tp4/`. Confirmed by hash on 2026-10-26 at `4f5d46a`: `B/wan2_1/native_tp4_hashcheck/` |
 | | AoT | 956.4 ms | **123.16 s** with `--host-vae` (A2) | **449.4 s** with `--host-vae` (A2) | 5935.7 s (the transformer stage alone: 430.5 s) | 10.34 GiB | pending CPU references. The device-VAE frames are corrupted: 12.41 dB against a host fp32 decode | 2026-10-26 at main `540e5f0`: `B/wan2_1/aot_main_tp4_twocore/` and `…_hostvae/` |
 | LTX-2, 480x704x49, g1.0 | native | 350.5 ms | 92.46 s | 594.76 s (Gemma-3 weight store) | 327.59 s | 16.51-16.52 GiB | pending CPU references | 2026-10-26: compile at `999c434`, the other runs at `009d3dd`. `B/ltx_2/native_tp4/` |
@@ -731,6 +732,53 @@ Tooling only, 2026-10-26 16:50–17:50 UTC. No 50-step reference has run yet, an
 - **Text encoders:** fp32 here, at the device runs' own dtypes and placements there (plan D2, D8; for example Qwen2.5-VL in bf16 at TP4 on the AoT device, Gemma-3 in bf16 on the native device).
 - **VAEs:** fp32 diffusers VAEs here. On the device, Qwen-Image decodes with an fp32 VAE on native and a compiled bf16 VAE on AoT. LTX-2 decodes on the host on both backends (in bf16 on native).
 
+## Phase 4: Qwen-Image CPU fp32 references (50 steps)
+
+2026-10-26 17:49–20:12 UTC, CPU only: the Neuron device was idle throughout (`neuron_users` empty at each start, no Neuron module or `/dev/neuron*` fd in either process).
+
+**How they ran**
+- One `systemd-run --user` unit, `cpuref_qwen_queue`, ran `B/scripts/job_cpu_ref_queue_qwen.sh`: the two Qwen-Image entries of `job_cpu_ref_queue_qwen_ltx2.sh`, one after the other, each through `job_cpu_ref.sh` under `/usr/bin/time -v`. Queue log: `B/cpu_ref_queue_qwen.log`.
+- Script `cpu_ref_qwen.py` (sha256 `90e537fe…`; `cpu_ref_common.py` `f88cce3f…`), unchanged since the tooling stage.
+- diffusers' `QwenImagePipeline`, every component in fp32, snapshot `75e0b4be…`, 1024x1024, 50 steps, `guidance_scale=4.0` (ignored: `guidance_embeds` false), `true_cfg_scale=1.0` with no negative prompt. 50 DiT calls in each run (one per step), as on both device backends.
+- **Environment:** venv `/home/ubuntu/venvs/difflet-neuron`, Python 3.12.3, torch 2.9.1, diffusers 0.38.0, transformers 4.57.6. torch threads: 6 intra-op, 6 inter-op (6 physical cores; `time -v` shows 545% and 563% CPU).
+
+**Injection and schedule**
+- In both runs, the transformer's first `hidden_states` is bit-identical to the fp32 upcast of the device dump and rounds back to its bf16 bits.
+- `B/qwen_image/cpu_ref/schedule_check.json` (`B/scripts/schedule_check_qwen.py`) rebuilds the device schedule from the snapshot's scheduler config:
+  - the formula is the one both device CLIs use: `sigmas = linspace(1, 1/50, 50)`, dynamic shift `mu` = 0.693548 at image_seq_len 4096 (main `difflet/cli/orchestrators/qwen_image.py:277-283`; native `difflet/models/qwen_image/neuron_application.py:661-672`);
+  - both references' recorded timesteps and sigmas are identical to it (max |Δt| 0).
+
+| reference | initial (device q1 dump) | text-encoder load + encode | DiT + VAE load | denoise, 50 steps | step median (min–max) | decode | wall | peak RSS (`time -v`) | lowest host MemAvailable |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| `ref_aot_noise_50` | `B/qwen_image/aot_main_tp4/q1/initial.pt` `c2d9d8b3…` (raw `4dfaec64…`) | 2.8 + 1.5 s (in the page cache) | 298.6 s | 4026.4 s | 80.54 s (79.62–82.82) | 19.3 s | 4352.4 s (1:12:39) | 85.44 GiB | 36.4 GiB |
+| `ref_native_noise_50` | `B/qwen_image/native_tp4_hashcheck/q1/initial.pt` `95a4306b…` (raw `750e9824…`) | 126.0 + 1.5 s (evicted by the previous run) | 24.9 s | 4073.1 s | 81.52 s (79.59–83.50) | 19.0 s | 4249.0 s (1:10:53) | 85.44 GiB | 36.5 GiB |
+
+**Outputs** (in `B/qwen_image/cpu_ref/<reference>/`, with `run.log`, `rc` 0 and `reference.json`)
+- `ref_aot_noise_50`: `final.pt` `6b8a5dea…` (fp32 (1,4096,64)), `out.pt` `a0a9edf3…` (fp32 (1,3,1024,1024), range 0.029–0.972), `out.png` `464155ec…`.
+- `ref_native_noise_50`: `final.pt` `b357f08a…`, `out.pt` `2c8ff472…` (range 0.035–0.927), `out.png` `09035397…`.
+- I opened both PNGs: both show a red fox running through snow in a forest, on prompt.
+
+**Metrics** (`quality_metrics.py`, main's definitions; frames: the device `out.png` as it is against `to_uint8` of the reference's fp32 `out.pt`; latents: the device `final.pt` (bf16) against the reference's `final.pt`, both packed loop outputs)
+
+| pair (same noise) | PSNR | SSIM (R / G / B) | latent rel-L2 | latent cosine | file |
+|---|---:|---:|---:|---:|---|
+| AoT device q1 vs `ref_aot_noise_50` | **21.48 dB** | **0.9115** (0.915 / 0.911 / 0.908) | 0.276 | 0.9614 | `B/qwen_image/cpu_ref/metrics_aot_vs_ref.json` |
+| native device q1 vs `ref_native_noise_50` | **16.11 dB** | **0.8234** (0.813 / 0.828 / 0.829) | 0.522 | 0.8722 | `B/qwen_image/cpu_ref/metrics_native_vs_ref.json` |
+| control: native device vs `ref_aot_noise_50` (mismatched noise) | 11.96 dB | 0.634 | 0.798 | 0.675 | `…/control_native_dev_vs_aotnoise_ref.json` |
+| control: AoT device vs `ref_native_noise_50` (mismatched noise) | 11.47 dB | 0.586 | 0.912 | 0.607 | `…/control_aot_dev_vs_nativenoise_ref.json` |
+
+Reading the numbers:
+- Both matched pairs sit well above the mismatched-noise controls, so the pairing is right and each device run follows its reference's trajectory.
+- The native image keeps its reference's composition (a fox facing right in the same place) but not its pose: the reference fox leaps, the device fox trots. A late-trajectory divergence of that kind costs far more PSNR than it changes the picture. The AoT pair keeps the pose.
+- Compare with care: the two backends start from different noise, so 21.5 vs 16.1 dB measures how far each run drifts from its own fp32 trajectory. It is not a pixel comparison of the backends. Both runs pass through the same known differences from the reference (below), and a single seed cannot separate them. *Inference:* the text conditioning (padding, below) is the largest common difference.
+- The 20-step AoT figure from the bf16-reduce campaign (24.72 dB, SSIM 0.957, cosine 0.981, same AoT noise `c2d9d8b3…`) is not comparable: more steps leave more room to diverge.
+
+**Known differences from the device runs (carried into the metrics)**
+- **Text:** diffusers encodes the real 17 tokens, (1,17,3584) fp32, and drops the all-ones mask. Both device runs zero-pad to `TEXT_SEQ_LEN` and attend the padding unmasked.
+- **Text encoder:** fp32 here. On the device, Qwen2.5-VL runs in bf16: at TP4 on the device for AoT, on rank 0's host for native.
+- **DiT:** fp32 here, bf16 at TP4 on both device backends.
+- **VAE:** fp32 here. On the device, native decodes with an fp32 VAE and AoT with a compiled bf16 VAE.
+
 ## Next
 
 - **Phase 4 (CPU):** the 7 references, 50 steps each, in fp32, Qwen-Image and LTX-2 first. Inputs:
@@ -741,7 +789,8 @@ Tooling only, 2026-10-26 16:50–17:50 UTC. No 50-step reference has run yet, an
     - AoT noise: `B/ltx_2/aot_main_tp4_twocore/q1`;
     - native noise: `B/ltx_2/native_tp4/q1`, `initial_video` / `initial_audio` raw `55b90133…` / `24900b1b…`.
     - The reference needs a lossless frames output (plan D9): done, `cpu_ref_ltx2.py` writes `out.pt`.
-  - Qwen-Image and LTX-2 are ready to run: `B/scripts/job_cpu_ref_queue_qwen_ltx2.sh` as one systemd unit (about 5–5.5 h), then `metrics_qwen_ltx2.sh`.
+  - Qwen-Image: **done** (section "Phase 4: Qwen-Image CPU fp32 references").
+  - LTX-2 is ready to run: `B/scripts/job_cpu_ref_queue_qwen_ltx2.sh` as one systemd unit (about 2.6 h; it skips the two Qwen-Image runs, which have an `rc`), then the LTX-2 half of `metrics_qwen_ltx2.sh`. The Qwen-Image half has already been run by hand and would only rewrite the same two JSONs.
   - **HunyuanVideo:**
     - native noise: fp32, `B/hunyuan_video/native_tp4_hashcheck/q1/initial.pt`;
     - AoT noise: bf16, `B/hunyuan_video/aot_main_tp4/q1/initial.pt`.
