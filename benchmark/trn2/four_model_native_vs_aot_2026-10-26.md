@@ -5,7 +5,7 @@
 - **LTX-2 native:** a full cell under cold definition A, measured in phase 2.
 - **Qwen-Image, HunyuanVideo and Wan2.1 native:** numbers reused from earlier cells on this host. Phase 2 confirmed them at the current branch HEAD by bit-identical outputs (plan D10, option A).
 
-PSNR / SSIM: **Qwen-Image has numbers** (phase 4, both 50-step CPU fp32 references, section "Phase 4: Qwen-Image CPU fp32 references"). The other three models are **pending CPU references**. Cold e2e is definition A throughout. Definition B (native without its weight store, Wan2.1 and LTX-2 only) comes later (plan phase 6).
+PSNR / SSIM: **Qwen-Image and LTX-2 have numbers** (phase 4, two 50-step CPU fp32 references each, sections "Phase 4: Qwen-Image CPU fp32 references" and "Phase 4: LTX-2 CPU fp32 references"). HunyuanVideo and Wan2.1 are **pending CPU references**. Cold e2e is definition A throughout. Definition B (native without its weight store, Wan2.1 and LTX-2 only) comes later (plan phase 6).
 
 **Device:** trn2.3xlarge: 1 device, 4 NeuronCores (LNC=2, 24 GiB HBM per core), 12 vCPU, 124.8 GiB RAM, one EBS root volume. The host is the same one used for `native_vs_aot_tp4_2026-10-25.md`.
 
@@ -40,8 +40,8 @@ All values were re-read from the run records (`summary.json`, `stats_gen1-3.txt`
 | | AoT | 360.6 ms | 73.7 s | 515.6 s | 1209.9 s | 10.10 GiB | 21.48 dB / 0.912 (latent cosine 0.961), against the CPU fp32 reference from AoT's noise | 2026-10-26 at main `540e5f0`: `B/qwen_image/aot_main_tp4/` |
 | Wan2.1 14B, 480x832x9, g5.0 (CFG) | native | 1063.6 ms | 128.5 s | 542.7 s (weight store) | 600.3 s | 15.15 GiB on the DiT cores, 18.40 on the VAE core | pending CPU references | *reused*: 2026-10-25 at `8b2408c`, `/home/ubuntu/bench-2026-10-25/wan2_1/native_tp4/`. Confirmed by hash on 2026-10-26 at `4f5d46a`: `B/wan2_1/native_tp4_hashcheck/` |
 | | AoT | 956.4 ms | **123.16 s** with `--host-vae` (A2) | **449.4 s** with `--host-vae` (A2) | 5935.7 s (the transformer stage alone: 430.5 s) | 10.34 GiB | pending CPU references. The device-VAE frames are corrupted: 12.41 dB against a host fp32 decode | 2026-10-26 at main `540e5f0`: `B/wan2_1/aot_main_tp4_twocore/` and `…_hostvae/` |
-| LTX-2, 480x704x49, g1.0 | native | 350.5 ms | 92.46 s | 594.76 s (Gemma-3 weight store) | 327.59 s | 16.51-16.52 GiB | pending CPU references | 2026-10-26: compile at `999c434`, the other runs at `009d3dd`. `B/ltx_2/native_tp4/` |
-| | AoT | 400.1 ms | 66.55 s | 778.1 s | 1052.2 s | 9.81 GiB | pending CPU references | 2026-10-26 at main `540e5f0`: `B/ltx_2/aot_main_tp4_twocore/` |
+| LTX-2, 480x704x49, g1.0 | native | 350.5 ms | 92.46 s | 594.76 s (Gemma-3 weight store) | 327.59 s | 16.51-16.52 GiB | 18.06 dB / 0.811 (latent cosine 0.930 video, 0.989 audio), against the CPU fp32 reference from native's noise | 2026-10-26: compile at `999c434`, the other runs at `009d3dd`. `B/ltx_2/native_tp4/` |
+| | AoT | 400.1 ms | 66.55 s | 778.1 s | 1052.2 s | 9.81 GiB | 16.21 dB / 0.660 (latent cosine 0.725 video, 0.980 audio), against the CPU fp32 reference from AoT's noise. Far below the 2026-10-24 single-core 20-step run (cosine 0.991); not yet explained, see the LTX-2 phase 4 section | 2026-10-26 at main `540e5f0`: `B/ltx_2/aot_main_tp4_twocore/` |
 
 **Native vs AoT**, computed as (native − AoT) / AoT from the unrounded run values:
 
@@ -779,6 +779,86 @@ Reading the numbers:
 - **DiT:** fp32 here, bf16 at TP4 on both device backends.
 - **VAE:** fp32 here. On the device, native decodes with an fp32 VAE and AoT with a compiled bf16 VAE.
 
+## Phase 4: LTX-2 CPU fp32 references (50 steps)
+
+The references ran 2026-10-26 20:15–22:51 UTC and a 20-step cross-check ran 22:57–23:38 UTC, all on the CPU. The Neuron device was idle throughout: `neuron_users` was empty at each start, and no process loaded a Neuron module or opened a `/dev/neuron*` fd.
+
+**How they ran**
+- One `systemd-run --user` unit, `cpuref_ltx2_queue`, ran `B/scripts/job_cpu_ref_queue_ltx2.sh`. The script holds the two LTX-2 entries of `job_cpu_ref_queue_qwen_ltx2.sh` and runs them one after the other, each through `job_cpu_ref.sh` under `/usr/bin/time -v`. Queue log: `B/cpu_ref_queue_ltx2.log`.
+- Script `cpu_ref_ltx2.py` (sha256 `e9fd953b…`; `cpu_ref_common.py` `f88cce3f…`), unchanged since the tooling stage.
+- diffusers' `LTX2Pipeline` at snapshot `47da56e2…`, with every component in fp32: Gemma-3, connectors, a 48-block DiT of 18.88 B parameters, the video VAE, the audio VAE and the vocoder.
+  - Workload: 480x704x49 at 24 fps, 50 steps, `guidance_scale=1.0`, so CFG is off.
+  - Each run made 50 DiT calls, one per step, as on both device backends.
+  - Prompt embeds: (1,1024,188160) fp32 with 13 real tokens (`mask_sum` 13).
+- **Environment:** venv `/home/ubuntu/venvs/difflet-neuron`, Python 3.12.3, torch 2.9.1, diffusers 0.38.0, transformers 4.57.6.
+  - torch threads: 6 intra-op and 6 inter-op, on 6 physical cores.
+  - `time -v` shows 511% and 524% CPU.
+
+**Injection and schedule**
+- In both runs, the transformer's first `hidden_states` and `audio_hidden_states` are bit-identical to the fp32 upcast of the device dumps, and both round back to the dumps' bf16 bits.
+- `B/ltx_2/cpu_ref/schedule_check.json` (from `B/scripts/schedule_check_ltx2.py`) rebuilds the device schedule from the snapshot's scheduler config.
+  - Both backends use the same formula: `sigmas = linspace(1, 1/50, 50)`, and `mu = ltx_2_scheduler_mu` at `max_image_seq_len` = 2.05, with `shift_terminal` 0.1 from the config.
+    - Native: `difflet/models/ltx_2/pipeline.py:493-517,1172-1186`.
+    - AoT: main `difflet/models/ltx_2/pipeline.py:511-517,1181-1195`.
+  - diffusers' `calculate_shift` groups the `mu` expression differently but gives the same bits.
+  - Both references' recorded timesteps and sigmas are identical to the rebuilt schedule (max |Δt| 0, max |Δσ| 0).
+
+| reference | initial (device q1 dumps, file / raw sha256) | Gemma-3 load + encode | DiT + decoders load | denoise, 50 steps | step median (min–max) | decode | wall | peak RSS (`time -v`) | peak RssAnon | lowest host MemAvailable |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `ref_aot_noise_50` | `B/ltx_2/aot_main_tp4_twocore/q1`: video `4458e4cf…` / `1b2149d9…`, audio `8e52babb…` / `fb75005f…` | 1.9 + 360.0 s (cold) | 329.2 s | 3980.5 s | 79.49 s (79.04–85.20) | 25.9 s | 4701.3 s (1:18:28) | 117.24 GiB | 85.29 GiB | 36.54 GiB |
+| `ref_native_noise_50` | `B/ltx_2/native_tp4/q1`: video `16e09464…` / `55b90133…`, audio `411c72d9…` / `24900b1b…` | 2.2 + 358.6 s (evicted by the previous run) | 184.5 s | 4023.7 s | 80.13 s (79.60–85.47) | 27.5 s | 4600.7 s (1:16:49) | 116.00 GiB | 85.21 GiB | 36.41 GiB |
+
+- In both runs, the 117 GiB RSS peak includes the mmapped fp32 checkpoint pages: Gemma-3 during the encode, then the DiT. Anonymous memory peaked at 85.3 GiB, and the host never had less than 36.4 GiB available.
+
+**Outputs** (in `B/ltx_2/cpu_ref/<reference>/`, beside `run.log`, `rc` 0 and `reference.json`)
+
+| file | `ref_aot_noise_50` | `ref_native_noise_50` |
+|---|---|---|
+| `final_video.pt`, fp32 (1,2310,128), the packed loop output | `5d88c6a0…` | `5e239f4d…` |
+| `final_audio.pt`, fp32 (1,51,128) | `c1f702ac…` | `82d883e9…` |
+| `out.pt`, fp32 (1,49,3,480,704) in [0,1], lossless frames | `95f016cc…`, range 0–0.952 | `ed701374…`, range 0–1 |
+| `audio.pt`, the vocoder waveform, fp32 (1,2,48240) | `054b4f53…` | `c8904bb7…` |
+| `mid.png`, frame 24 | `957a0a24…` | `6e08645e…` |
+
+- **Content:** I opened both mid frames and compared each with its device counterpart.
+  - **Native noise:** a red fox runs across deep snow in a conifer forest, with the same cyan cast as the native device output. So the cyan cast and the soft fox come from the workload (guidance 1, no CFG), not from the device. The device frame has the same fox, in the same pose and place; only the background trees differ.
+  - **AoT noise:** a snowy forest with pine branches and a blurred red-brown animal, only loosely on prompt. The AoT device frame shares the colour scheme but not the layout: it shows a large smeared shape where the reference has trees and the animal.
+
+**Metrics** (`B/scripts/metrics_ltx2.sh`, which runs `quality_metrics.py` with main's definitions)
+- Frames: the device q1 `out.pt` (bf16, upcast exactly) against the reference's fp32 `out.pt`. Both are turned into RGB uint8 by the one rule `uint8(clamp(x·255 + 0.5, 0, 255))`, and there is no other preprocessing. All 49 frames are compared.
+- Latents: the device `final_video.pt` / `final_audio.pt` (bf16) against the reference's fp32 ones, all packed loop outputs.
+
+| pair | PSNR mean (worst) | SSIM mean (worst); R / G / B | video latent rel-L2 / cosine | audio latent rel-L2 / cosine | file |
+|---|---:|---:|---:|---:|---|
+| **AoT device q1 vs `ref_aot_noise_50`** (same noise) | **16.21 dB** (15.45, frame 5) | **0.660** (0.555, frame 48); 0.687 / 0.666 / 0.627 | 0.786 / **0.725** | 0.335 / 0.980 | `B/ltx_2/cpu_ref/metrics_aot_vs_ref.json` |
+| **native device q1 vs `ref_native_noise_50`** (same noise) | **18.06 dB** (16.49, frame 27) | **0.811** (0.743, frame 15); 0.820 / 0.808 / 0.807 | 0.414 / **0.930** | 0.229 / 0.989 | `B/ltx_2/cpu_ref/metrics_native_vs_ref.json` |
+| control: native device vs `ref_aot_noise_50` (mismatched noise) | 6.88 dB | 0.437 | 1.504 / 0.198 | 1.070 / 0.595 | `…/control_native_dev_vs_aotnoise_ref.json` |
+| control: AoT device vs `ref_native_noise_50` (mismatched noise) | 9.13 dB | 0.490 | 1.128 / 0.315 | 0.997 / 0.563 | `…/control_aot_dev_vs_nativenoise_ref.json` |
+| control: the two references against each other (noise only) | 8.15 dB | 0.470 | 1.414 / 0.176 | 1.039 / 0.522 | `…/control_ref_native_vs_ref_aot.json` |
+
+**Reading the numbers**
+- Both matched pairs sit well above the three mismatched-noise controls, so the pairing is right.
+- **Native** follows its fp32 trajectory closely: video latent cosine 0.930, and the same fox in the same pose.
+- **AoT** follows its trajectory much more loosely: video latent cosine 0.725 and 16.2 dB, with a different layout in the frames. Its audio latents stay close (cosine 0.980).
+- As for Qwen-Image, the two backends start from different noise, so this compares each run with its own fp32 trajectory. It is not a pixel comparison of the backends.
+
+**The AoT gap against the 2026-10-24 run** (an open finding, not explained yet)
+- **2026-10-24:** single-core attention (`MODULE_20da5719`), bf16 all-reduce, 20 steps, same noise `4458e4cf…`. Against its 20-step CPU reference, it scored video latent cosine 0.991 and 34.14 dB (`/home/ubuntu/campaign/bf16-reduce/runs/ltx2/quality_bf16_vs_cpu.json`, mp4 against mp4).
+- **Today:** the two-core module (`MODULE_e1043f48…`, `attention_cte_lnc0` with grid 2), 50 steps, scored cosine 0.725.
+- **The reference side is ruled out:**
+  - A 20-step reference with today's script from the same AoT dumps (`B/ltx_2/cpu_ref/xcheck_aot_noise_20/`, rc 0, wall 2414 s, `final_video.pt` `5b953937…`) gives a `final_video` bit-identical to the 2026-10-24 CPU reference (`/home/ubuntu/campaign/bf16-reduce/runs/cpu_ref/ltx_2/final_video.pt`; `torch.equal`, max |Δ| 0).
+  - Against it, the 2026-10-24 device output (`bf16/warm1/final_video.pt` `b426bc92…`) gives video cosine 0.9907 and audio cosine 0.9994 (`xcheck_dev20_2026-10-24_vs_ref20.json`, `xcheck_ref20_vs_ref20_2026-10-24.json`).
+  - That 2026-10-24 reference ran with `torch_xla` loaded (`xm.mark_step()` every step) and today's does not. The identical result shows that this did not change the numbers.
+- **What remains is the device side:** 50 against 20 steps, and two-core against single-core attention. A device run can separate them; the device stays idle in this phase.
+  - *Comparison:* Qwen-Image AoT went from cosine 0.981 at 20 steps to 0.961 at 50 steps, and LTX-2 native at 50 steps reaches 0.930. So more steps alone would not obviously cost this much.
+  - *Recommendation for the next device block:* run LTX-2 AoT two-core at 20 steps from the same seed and compare it with `xcheck_aot_noise_20` and with `b426bc92…`. If it stays near 0.99, the steps explain the gap; if it falls, two-core attention does. Optionally also run single-core at 50 steps against `ref_aot_noise_50`.
+
+**Known differences from the device runs (carried into the metrics)**
+- **Text encoder:** Gemma-3 runs in fp32 here. Native runs it in bf16 on the device at TP4. AoT runs it in bf16 on the host (main's host pipeline loads with `torch_dtype=bfloat16`, `difflet/models/ltx_2/application.py:425-445`; the orchestrator's `_dtype` is bf16).
+- **Connectors:** fp32 here, bf16 on both backends.
+- **DiT:** fp32 here, bf16 at TP4 on both backends.
+- **Decoders:** the video VAE, audio VAE and vocoder run in fp32 here. Both backends decode on the host in bf16.
+
 ## Next
 
 - **Phase 4 (CPU):** the 7 references, 50 steps each, in fp32, Qwen-Image and LTX-2 first. Inputs:
@@ -790,7 +870,7 @@ Reading the numbers:
     - native noise: `B/ltx_2/native_tp4/q1`, `initial_video` / `initial_audio` raw `55b90133…` / `24900b1b…`.
     - The reference needs a lossless frames output (plan D9): done, `cpu_ref_ltx2.py` writes `out.pt`.
   - Qwen-Image: **done** (section "Phase 4: Qwen-Image CPU fp32 references").
-  - LTX-2 is ready to run: `B/scripts/job_cpu_ref_queue_qwen_ltx2.sh` as one systemd unit (about 2.6 h; it skips the two Qwen-Image runs, which have an `rc`), then the LTX-2 half of `metrics_qwen_ltx2.sh`. The Qwen-Image half has already been run by hand and would only rewrite the same two JSONs.
+  - LTX-2: **done** (section "Phase 4: LTX-2 CPU fp32 references"). It leaves an open finding, the AoT gap against 2026-10-24, which needs a 20-step two-core AoT device run.
   - **HunyuanVideo:**
     - native noise: fp32, `B/hunyuan_video/native_tp4_hashcheck/q1/initial.pt`;
     - AoT noise: bf16, `B/hunyuan_video/aot_main_tp4/q1/initial.pt`.
