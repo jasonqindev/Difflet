@@ -5,7 +5,7 @@
 - **LTX-2 native:** a full cell under cold definition A, measured in phase 2.
 - **Qwen-Image, HunyuanVideo and Wan2.1 native:** numbers reused from earlier cells on this host. Phase 2 confirmed them at the current branch HEAD by bit-identical outputs (plan D10, option A).
 
-PSNR / SSIM: **Qwen-Image and LTX-2 have numbers** (phase 4, two 50-step CPU fp32 references each, sections "Phase 4: Qwen-Image CPU fp32 references" and "Phase 4: LTX-2 CPU fp32 references", collected with the tool sanity checks and a look at the references in "Quality vs CPU fp32 reference (part 1)"). Wan2.1 (both backends, one shared reference) and HunyuanVideo native have numbers too (section "Quality vs CPU fp32 reference (part 2)"). **HunyuanVideo AoT is pending** its AoT-noise CPU reference, which runs on the next machine. Cold e2e is definition A in the tables above. Definition B (native without its weight store, Wan2.1 and LTX-2 only, plan phase 6) was measured on 2026-10-27 on a replacement host with the same root volume: Wan2.1 762.55 s and LTX-2 785.40 s, against A 533.89 s and 603.23 s on that host (section "2026-10-27, new host").
+PSNR / SSIM: **Qwen-Image and LTX-2 have numbers** (phase 4, two 50-step CPU fp32 references each, sections "Phase 4: Qwen-Image CPU fp32 references" and "Phase 4: LTX-2 CPU fp32 references", collected with the tool sanity checks and a look at the references in "Quality vs CPU fp32 reference (part 1)"). Wan2.1 (both backends, one shared reference) and HunyuanVideo native have numbers too (section "Quality vs CPU fp32 reference (part 2)"). HunyuanVideo AoT has numbers too, from its AoT-noise reference run on 2026-10-27 on the replacement host (19.65 dB / 0.774, section "HunyuanVideo AoT vs its CPU fp32 reference"). All 8 cells now have PSNR / SSIM. Cold e2e is definition A in the tables above. Definition B (native without its weight store, Wan2.1 and LTX-2 only, plan phase 6) was measured on 2026-10-27 on a replacement host with the same root volume: Wan2.1 762.55 s and LTX-2 785.40 s, against A 533.89 s and 603.23 s on that host (section "2026-10-27, new host").
 
 **Device:** trn2.3xlarge: 1 device, 4 NeuronCores (LNC=2, 24 GiB HBM per core), 12 vCPU, 124.8 GiB RAM, one EBS root volume. The host is the same one used for `native_vs_aot_tp4_2026-10-25.md`.
 
@@ -35,7 +35,7 @@ All values were re-read from the run records (`summary.json`, `stats_gen1-3.txt`
 | model | backend | DiT step | warm e2e | cold e2e A | compile | peak HBM per core | PSNR / SSIM | date, commit, evidence |
 |---|---|---:|---:|---:|---:|---|---|---|
 | HunyuanVideo 1.0, 320x512x61, g6.0 | native | 808.2 ms | 126.7 s | 457.8 s | 274.5 s | 17.95 GiB on the decoder core, 12.98 on the other three | 20.78 dB / 0.869 (latent cosine 0.982), against the CPU fp32 reference from native's noise | *reused*: 2026-10-25/26 at `eadddec`, `/home/ubuntu/bench-2026-10-26/hunyuan_video/s4_tp4/`. Confirmed by hash on 2026-10-26 at `4f5d46a`: `B/hunyuan_video/native_tp4_hashcheck/` |
-| | AoT | 801.8 ms | 133.0 s | 617.5 s | 4526.7 s | 15.53 GiB | pending: the CPU fp32 reference from AoT's noise (`ref_aot_noise_50`) runs on the next machine | 2026-10-26 at main `540e5f0`: `B/hunyuan_video/aot_main_tp4/` |
+| | AoT | 801.8 ms | 133.0 s | 617.5 s | 4526.7 s | 15.53 GiB | 19.65 dB / 0.774 (latent cosine 0.969), against the CPU fp32 reference from AoT's noise (2026-10-27, new host) | 2026-10-26 at main `540e5f0`: `B/hunyuan_video/aot_main_tp4/` |
 | Qwen-Image, 1024x1024, g4.0 | native | 359.0 ms | 82.3 s | 502.0 s | 187.0 s | 10.81 GiB on the DiT cores, 13.85 on the VAE core | 16.11 dB / 0.823 (latent cosine 0.872), against the CPU fp32 reference from native's noise | *reused*: 2026-10-25 at `4f6e1de`, `/home/ubuntu/bench-2026-10-25/qwen_image/native_tp4/`. Confirmed by hash on 2026-10-26 at `a87d89c`: `B/qwen_image/native_tp4_hashcheck/` |
 | | AoT | 360.6 ms | 73.7 s | 515.6 s | 1209.9 s | 10.10 GiB | 21.48 dB / 0.912 (latent cosine 0.961), against the CPU fp32 reference from AoT's noise | 2026-10-26 at main `540e5f0`: `B/qwen_image/aot_main_tp4/` |
 | Wan2.1 14B, 480x832x9, g5.0 (CFG) | native | 1063.6 ms | 128.5 s | 542.7 s (weight store) | 600.3 s | 15.15 GiB on the DiT cores, 18.40 on the VAE core | 22.66 dB / 0.885 (latent cosine 0.967), against the one CPU fp32 reference both backends share (same noise) | *reused*: 2026-10-25 at `8b2408c`, `/home/ubuntu/bench-2026-10-25/wan2_1/native_tp4/`. Confirmed by hash on 2026-10-26 at `4f5d46a`: `B/wan2_1/native_tp4_hashcheck/` |
@@ -1058,7 +1058,7 @@ Tooling only, 2026-10-26 23:50 to 2026-10-27 00:50 UTC. No 50-step reference has
 
 ### HunyuanVideo native vs its CPU fp32 reference
 
-**The native row is done; the AoT row is pending on the next machine.** The AoT-noise reference `ref_aot_noise_50` (from the AoT bf16 noise `B/hunyuan_video/aot_main_tp4/q1/initial.pt` `e13a3f46…`) did not run on this host: it needs about 4 h and the host is terminated at about 11:00 UTC. The command is `job_cpu_ref_queue_wan_hv.sh` run (3); the inputs and expected hashes are in "Phase 4 part 2 preparation". After it, the AoT row is `quality_part2_hv.sh` with the AoT q1 (`aot_main_tp4/q1/out.pt` `33a8a130…` and `final.pt`) against it. Caveat for that row: the AoT VAE tiling caps frame PSNR at about 42.5 dB (`hunyuan_video_neuron.md`).
+**The native row was done on the first host; the AoT row was done on 2026-10-27 on the replacement host** (section "HunyuanVideo AoT vs its CPU fp32 reference" below). The paragraph that follows is the plan as written before the host change. The AoT-noise reference `ref_aot_noise_50` (from the AoT bf16 noise `B/hunyuan_video/aot_main_tp4/q1/initial.pt` `e13a3f46…`) did not run on this host: it needs about 4 h and the host is terminated at about 11:00 UTC. The command is `job_cpu_ref_queue_wan_hv.sh` run (3); the inputs and expected hashes are in "Phase 4 part 2 preparation". After it, the AoT row is `quality_part2_hv.sh` with the AoT q1 (`aot_main_tp4/q1/out.pt` `33a8a130…` and `final.pt`) against it. Caveat for that row: the AoT VAE tiling caps frame PSNR at about 42.5 dB (`hunyuan_video_neuron.md`).
 
 **Reference `B/hunyuan_video/cpu_ref/ref_native_noise_50`** (unit `cpuref_chain_hv_native` → `job_chain_hv_native_after_wan.sh`, `cpu_ref_hv.py` `a4c90338…`, diffusers `HunyuanVideoPipeline` in fp32, 320x512x61, 50 steps, embedded guidance 6.0, `true_cfg_scale` 1.0, no negative prompt)
 - **Ran** 2026-10-27 05:33:24 to 09:40:00 UTC, `rc` 0. Wall 14792.6 s (4.11 h; `/usr/bin/time` 4:06:36), against the 3.9–4.0 h estimate.
@@ -1092,7 +1092,7 @@ Tooling only, 2026-10-26 23:50 to 2026-10-27 00:50 UTC. No 50-step reference has
 | pair (same noise) | PSNR mean (worst frame) | SSIM mean (worst frame); R / G / B | latent rel-L2 / cosine | file |
 |---|---:|---:|---:|---|
 | native device q1 vs `ref_native_noise_50` | **20.78 dB** (17.49, frame 52) | **0.869** (0.796, frame 52); 0.870 / 0.871 / 0.865 | 0.193 / **0.982** | `hv_native_vs_ref.json` |
-| AoT device q1 vs `ref_aot_noise_50` | pending: the reference runs on the next machine | pending | pending | |
+| AoT device q1 vs `ref_aot_noise_50` | **19.65 dB** (16.20, frame 30) | **0.774** (0.649, frame 36); 0.785 / 0.787 / 0.751 | 0.253 / **0.969** | `B/hunyuan_video/quality_part2_aot/hv_aot_vs_ref.json` |
 
 - **Per frame, PSNR** (native vs ref): 22.07, 22.46, 22.40, 20.52, 21.03, 21.73, 19.75, 19.46, 19.91, 22.37, 23.43, 22.61, 21.47, 20.38, 20.44, 19.69, 18.83, 18.02, 19.09, 19.75, 21.09, 22.31, 22.83, 23.08, 23.05, 23.94, 23.60, 23.11, 23.34, 24.12, 24.17, 22.81, 21.52, 21.63, 20.90, 20.65, 20.18, 21.27, 21.52, 21.48, 21.85, 21.75, 22.04, 20.60, 21.19, 20.79, 19.83, 18.64, 18.55, 18.48, 18.67, 17.97, 17.49, 17.59, 17.67, 18.00, 18.25, 18.81, 18.46, 20.17, 18.96. SSIM per frame ranges 0.796–0.93, lowest in frames 47–56.
 - **Reference timing and memory**, for the table: wall 14792.6 s (4.11 h), peak RSS 55.95 GiB (55.07 GiB anonymous).
@@ -1244,14 +1244,35 @@ Tooling only, 2026-10-26 23:50 to 2026-10-27 00:50 UTC. No 50-step reference has
 5. **One run per definition.** Reason: no run was anomalous (above).
 6. **HunyuanVideo AoT CPU reference started right after the device phase** (18:12:52 UTC, before the 19:30 limit), after the diagnostic metrics had finished, so that the reference had the host to itself.
 
-### HunyuanVideo AoT-noise CPU reference (started)
+### HunyuanVideo AoT vs its CPU fp32 reference
 
-- **Unit:** `systemd-run --user --unit=cpuref_hv_aot --collect -- bash B/scripts/job_cpu_ref_queue_wan_hv.sh`, started 18:12:52 UTC.
-  - The queue skipped `wan2_1/ref_50` (rc 0) and `hunyuan_video/ref_native_noise_50` (rc 0), and started `hunyuan_video/ref_aot_noise_50` (`B/cpu_ref_queue_wan_hv.log`).
-- **At start:** MemAvailable 121 GiB; `neuron_users` empty; `cpu_ref_hv.py` `a4c90338…`.
-- **Input:** the AoT bf16 noise `aot_main_tp4/q1/initial.pt`. The script's `--expect-initial-file-sha e13a3f46…` check passed: it reached `initial_loaded`.
-- **Expected:** about 4.1 h, so it should finish around 22:20 UTC. The bit-exact first-DiT-input check is written to `reference.json` at the end.
-- **Then:** the AoT row of part 2 (`quality_part2_hv.sh` pattern, AoT q1 against it).
+**Reference `B/hunyuan_video/cpu_ref/ref_aot_noise_50`** (unit `cpuref_hv_aot` → `job_cpu_ref_queue_wan_hv.sh` run (3), `cpu_ref_hv.py` `a4c90338…`, same settings as `ref_native_noise_50`; started from the AoT bf16 noise `aot_main_tp4/q1/initial.pt` `e13a3f46…`)
+- **Ran** 2026-10-27 from 18:12:52 UTC on the replacement host, `rc` 0. Wall 15387.4 s (4.27 h). Text encoders load 115.7 s + encode 6.1 s; DiT and VAE load 195.2 s; denoise 14590.7 s (step median 285.8 s); tiled fp32 decode and postprocess 470.0 s. Steps 5–9 were slower (325–389 s) while the phase-3 unit tests ran beside it; the result does not depend on speed.
+- **Memory:** peak VmRSS 55.66 GiB, RssAnon 54.79 GiB, lowest MemAvailable 66.91 GiB.
+- **Checks** (`B/hunyuan_video/quality_part2_aot/ref_brief.txt`, `schedule_check_ref.json`): injection bit-exact (`injection True True`), CPU only, 50 DiT calls with guidance 6000.0 (device 6016 in bf16), first timestep 1000.0, 13 valid prompt tokens; the 50-step schedule check is `ok: true`; `out.pt` equals the mapped `out_raw.pt` bit for bit.
+- **Outputs:** `final.pt` `d6a1c808…`, `out_raw.pt` `bf2de541…`, `out.pt` `a3803c95…`, `strip.png` `3815f142…`.
+
+**Metrics run.** `B/scripts/quality_part2_hv_aot.sh` (the native script's pattern for the AoT pair, same `quality_metrics.py`, `frames_map.py`, definitions and uint8 rule), output in `B/hunyuan_video/quality_part2_aot/`.
+
+| check | expected | result | file |
+|---|---|---|---|
+| `--selftest` | PASS | PASS | `selftest.txt` |
+| identical pair: reference against itself | inf, SSIM 1, rel-L2 0, cosine 1 | inf / 1.000 / 0 / 1.000 | `sanity_identical_hv_aot.json` |
+| mismatched-noise control: native device q1 against the AoT-noise reference | far below the matched pair | 8.95 dB (worst 5.58), SSIM 0.464, latent rel-L2 1.052 / cosine 0.526 | `control_hv_native_vs_refaot.json` |
+
+| pair (same noise) | PSNR mean (worst frame) | SSIM mean (worst frame); R / G / B | latent rel-L2 / cosine |
+|---|---:|---:|---:|
+| AoT device q1 vs `ref_aot_noise_50` | **19.65 dB** (16.20, frame 30) | **0.774** (0.649, frame 36); 0.785 / 0.787 / 0.751 | 0.253 / **0.969** |
+| native device q1 vs `ref_native_noise_50` (above) | 20.78 dB (17.49, frame 52) | 0.869 (0.796, frame 52) | 0.193 / 0.982 |
+
+- **Per frame, PSNR** (AoT vs ref): 24.48, 23.74, 23.56, 22.97, 22.81, 22.19, 21.29, 20.32, 20.08, 19.89, 19.47, 19.54, 19.55, 20.04, 20.93, 21.53, 22.22, 22.09, 21.59, 20.80, 19.88, 20.10, 20.03, 20.73, 19.47, 18.98, 18.73, 18.73, 18.05, 16.63, 16.20, 16.53, 17.07, 17.79, 17.45, 16.52, 16.34, 17.14, 17.45, 17.65, 17.71, 17.98, 18.19, 18.49, 18.19, 18.43, 18.23, 18.16, 17.65, 18.20, 18.31, 19.07, 20.24, 20.35, 21.35, 21.07, 20.83, 20.89, 21.28, 21.59, 21.59. SSIM per frame ranges 0.649–0.905.
+
+**What the frames show.** The reference strip shows the prompt: a large red fox running right across snow in front of a conifer forest, close to the camera. The AoT device strip (`strip_hv_aot_q1_0_15_30_45_60.png`) matches it in fox, pose, position and framing at frames 0, 15, 30, 45 and 60; legs, tail and background branches differ in detail.
+
+**Reading the numbers**
+- **Both HunyuanVideo backends follow their fp32 trajectories well**, native somewhat closer: latent cosine 0.982 vs 0.969, SSIM 0.869 vs 0.774, PSNR 20.78 vs 19.65 dB. Each is measured against the reference from its own noise, so this is two single samples from different starting points, not a paired comparison.
+- The matched AoT pair is 10.7 dB and 0.31 SSIM above its mismatched-noise control, which confirms the pairing.
+- Unlike LTX-2 AoT (video cosine 0.725 at 50 steps), HunyuanVideo AoT shows no large 50-step drift.
 
 ## Next
 
