@@ -6,11 +6,19 @@ the same tensor-parallel layout at the pipeline's TP degree: token embedding and
 position biases split across the embedding dimension, attention projections column-parallel
 with gathered outputs, the gated FFN column- then row-parallel.
 
-It runs in fp32 (about a quarter of the 22.7 GB fp32 encoder per rank), as the host path does:
-umT5 is fragile in bf16 (its FFN output projection ``wo`` produces large activations, which is
-why transformers keeps ``wo`` in fp32 for bf16 loads), its bf16 error against fp32 ranges over
-several x with CPU kernel choice alone, and it runs twice per request, so fp32 costs memory and
-nothing measurable in time. The embeddings are cast to the DiT's dtype afterwards.
+It runs in fp32 by default (about a quarter of the 22.7 GB fp32 encoder per rank), as the host
+path does: umT5 was judged fragile in bf16 (its FFN output projection ``wo`` produces large
+activations; transformers' ``_keep_in_fp32_modules`` keeps ``wo`` in fp32 for fp16 loads only, so
+a bf16 load casts it to bf16 too, as the AoT path's bf16 umT5 does), its bf16 error against fp32
+ranges over several x with CPU kernel choice alone, and it runs twice per request, so fp32 costs
+memory and nothing measurable in time. That fragility was never measured on the device.
+``dtype=torch.bfloat16`` (the composed application's ``text_encoder_dtype``, the CLI's
+``--text-encoder-dtype bf16``) is the opt-in behind the F13 accuracy gate (bf16 against fp32 per
+prompt, the empty negative prompt included, cosine >= 0.995, then a 50-step e2e). The weight
+store keys and writes entries in the load dtype (``core/weight_store.py``): the fp32 encoder
+gains nothing from an fp32 entry and gets none, the bf16 one gets an 11.36 GB entry (2.84 GB per
+rank at tp4) instead of re-reading the 22.7 GB checkpoint on every cold start. The embeddings are
+cast to the DiT's dtype afterwards.
 
 Like the AoT path it runs one static shape, ``(batch, text_seq_len)`` token ids and mask: a
 prompt is padded to ``text_seq_len`` and encoded whole, the mask keeping padding out of the real

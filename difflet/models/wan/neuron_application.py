@@ -21,13 +21,18 @@ launch builds one and holds:
   (``NeuronWanTextEncoderApplication``, about a quarter of the 22.7 GB fp32 encoder per rank),
   every rank encoding, the embeddings cast to the DiT's dtype. ``__init__`` refuses it when it
   clearly cannot fit beside the DiT on one core at this tp (``_check_device_text_encoder_fits``:
-  tp2, so CFG or CP on four cores and dp2tp2 replicas, does not fit);
+  tp2, so CFG or CP on four cores and dp2tp2 replicas, does not fit). ``text_encoder_dtype``
+  (fp32 by default; the CLI's ``--text-encoder-dtype``) sets umT5's precision in either place:
+  bf16 is the opt-in behind the F13 accuracy gate (bf16 against fp32 per prompt, the empty
+  negative prompt included, cosine >= 0.995, then a 50-step e2e). It also halves what the
+  device encoder reads and what the weight store keeps for it (11.36 GB instead of 22.7);
 * ``pipeline``: the backend-neutral ``WanOrchestrator`` (fp32 latents, UniPC on the host), which
   every rank runs on identical inputs; its DiT calls go through ``_OnDeviceTransformer``.
 
 * ``vae_decoder`` (``enable_vae_decoder=True``): ``_DeviceVaeDecoder``, the VAE decoder on every
-  rank's core in fp32, eager (``NeuronWanVaeDecoderApplication``); ``output_type="pt"`` then
-  returns decoded frames. Without it the VAE decodes outside this application: the CLI's vae
+  rank's core, eager, in ``vae_dtype`` (fp32 by default; bf16 is the opt-in of the CLI's
+  ``--vae-dtype bf16``) (``NeuronWanVaeDecoderApplication``); ``output_type="pt"`` then returns
+  decoded frames. Without it the VAE decodes outside this application: the CLI's vae
   stage runs the same decoder on one core, or diffusers on the host with ``--host-vae``.
 
 Parallelism: tensor parallelism, with or without sequence parallelism (Megatron SP within the
@@ -60,6 +65,7 @@ from typing import Any
 
 import torch
 
+from difflet.backends.neuron.core.application_base import _normalize_dtype
 from difflet.backends.neuron.core.model_application import (
     DeviceComponent,
     HostTextEncoder,
@@ -75,7 +81,9 @@ from difflet.backends.neuron.wan.vae import NeuronWanVaeDecoderApplication
 
 #: The keyword arguments the application accepts, with their defaults: the ones the Wan CLI
 #: stage passes the Trainium application (difflet/cli/orchestrators/wan.py) plus exec_mode,
-#: device and encoder_threads. Anything else is a TypeError rather than silently ignored.
+#: device, encoder_threads, text_encoder_device, and text_encoder_dtype and vae_dtype (umT5's
+#: and the device VAE decoder's precision, fp32 unless asked: see the module docstring).
+#: Anything else is a TypeError rather than silently ignored.
 _KWARG_DEFAULTS: dict[str, Any] = {
     "text_seq_len": 512,
     "batch_size": 1,
@@ -87,6 +95,8 @@ _KWARG_DEFAULTS: dict[str, Any] = {
     "device": "neuron",
     "encoder_threads": 12,
     "text_encoder_device": "host",
+    "text_encoder_dtype": torch.float32,
+    "vae_dtype": torch.float32,
     "shapes": None,
     "teacache_cadence": None,
     "teacache_online_delta_alpha": None,
@@ -95,7 +105,8 @@ _KWARG_DEFAULTS: dict[str, Any] = {
 
 
 class _HostTextEncoder(HostTextEncoder):
-    """umT5 in fp32 on rank 0's host; every rank receives the embeddings by broadcast.
+    """umT5 on rank 0's host in ``encoder_dtype`` (fp32 unless ``text_encoder_dtype`` says
+    otherwise); every rank receives the embeddings by broadcast.
 
     ``WanOrchestrator.encode_prompt`` tokenizes on every rank (cheap and deterministic) and
     calls this with ``(input_ids, attention_mask)`` padded on the right to ``seq_len``. Rank 0
@@ -111,11 +122,13 @@ class _HostTextEncoder(HostTextEncoder):
     its own device check first).
     """
 
-    def __init__(self, model_path, *, text_dim: int, seq_len: int, dtype, device, threads: int):
+    def __init__(self, model_path, *, text_dim: int, seq_len: int, dtype, device, threads: int,
+                 encoder_dtype=torch.float32):
         super().__init__(model_path, device=device, threads=threads)
         self.text_dim = int(text_dim)
         self.seq_len = int(seq_len)
         self.dtype = dtype
+        self.encoder_dtype = encoder_dtype
         self.model = None  # rank 0 only, after load()
 
     def _load(self) -> None:
@@ -125,7 +138,7 @@ class _HostTextEncoder(HostTextEncoder):
         from transformers import UMT5EncoderModel
 
         model = UMT5EncoderModel.from_pretrained(
-            os.path.join(self.model_path, "text_encoder"), dtype=torch.float32
+            os.path.join(self.model_path, "text_encoder"), dtype=self.encoder_dtype
         )
         return model.eval().requires_grad_(False)
 
@@ -181,17 +194,20 @@ class _DeviceTextEncoder(DeviceComponent):
 class _DeviceVaeDecoder(DeviceComponent):
     """The orchestrator's VAE decoder: host latents in (already un-normalised), host frames out.
 
-    Exposes what ``WanOrchestrator._decode_latents`` reads: ``dtype`` (fp32, the decode
-    precision) and ``config`` (``latents_mean``/``latents_std``).
+    Exposes what ``WanOrchestrator._decode_latents`` reads: ``dtype``, the precision the
+    orchestrator un-normalises in, fp32 whatever the decoder's own (``app.dtype``: fp32, or bf16
+    with ``vae_dtype``), so the un-normalisation is the CLI vae stage's (fp32 on the host) and
+    only the decoder's input is rounded; and ``config`` (``latents_mean``/``latents_std``). The
+    frames come back fp32 in either dtype (the decoder's fp32 output head).
     """
 
     def __init__(self, app: NeuronWanVaeDecoderApplication, *, device):
         super().__init__(app, device=device)
-        self.dtype = app.dtype
+        self.dtype = torch.float32
         self.config = app.vae_config
 
     def __call__(self, latents: torch.Tensor) -> torch.Tensor:
-        return self.app(latents.to(self.device, self.dtype)).cpu()
+        return self.app(latents.to(self.device, self.app.dtype)).cpu()
 
 
 class _OnDeviceTransformer(OnDeviceDiT):
@@ -318,15 +334,16 @@ class TorchNeuronWanApplication(TorchNeuronModelApplication):
                 exec_mode=options["exec_mode"],
                 device=self.device,
             )
+        encoder_dtype = _normalize_dtype(options["text_encoder_dtype"])
         if options["enable_text_encoder"] and options["text_encoder_device"] == "neuron":
-            self._check_device_text_encoder_fits()
+            self._check_device_text_encoder_fits(encoder_dtype)
             self.text_encoder = _DeviceTextEncoder(
                 NeuronWanTextEncoderApplication(
                     model_path=os.path.join(self.model_path, "text_encoder"),
                     text_seq_len=self.text_seq_len,
                     batch_size=1,
                     parallel=parallel,
-                    dtype=torch.float32,  # see NeuronWanTextEncoderApplication
+                    dtype=encoder_dtype,  # fp32 unless asked: see NeuronWanTextEncoderApplication
                     exec_mode=options["exec_mode"],
                     device=self.device,
                 ),
@@ -341,6 +358,7 @@ class TorchNeuronWanApplication(TorchNeuronModelApplication):
                 dtype=self.dtype,
                 device=self.device,
                 threads=int(options["encoder_threads"]),
+                encoder_dtype=encoder_dtype,
             )
         if options["enable_vae_decoder"]:
             cfg = self.config
@@ -350,12 +368,19 @@ class TorchNeuronWanApplication(TorchNeuronModelApplication):
                     latent_shape=(1, int(cfg.out_channels), cfg.latent_frames,
                                   cfg.latent_height, cfg.latent_width),
                     parallel=parallel,
-                    dtype=torch.float32,  # see NeuronWanVaeDecoderApplication
+                    # fp32 unless asked: see NeuronWanVaeDecoderApplication
+                    dtype=_normalize_dtype(options["vae_dtype"]),
                     device=self.device,
                 ),
                 device=self.device,
             )
         self.transformer_2_adapter: _OnDeviceTransformer | None = None
+
+    def _reject_model_options(self, options: dict[str, Any]) -> None:
+        for name in ("text_encoder_dtype", "vae_dtype"):
+            dtype = _normalize_dtype(options[name])
+            if dtype not in (torch.bfloat16, torch.float32):
+                raise ValueError(f"{name} must be bfloat16 or float32, got {dtype}")
 
     def _resolve_shape(self, shape: dict[str, int | None], shapes) -> dict[str, int]:
         if shapes:
@@ -373,15 +398,16 @@ class TorchNeuronWanApplication(TorchNeuronModelApplication):
             "num_frames": int(shape.get("num_frames") or 9),
         }
 
-    def _check_device_text_encoder_fits(self) -> None:
+    def _check_device_text_encoder_fits(self, encoder_dtype: torch.dtype) -> None:
         """umT5 on the device shares each core with this rank's DiT shards: refuse before
         anything loads when the two clearly cannot fit together
         (``difflet/backends/neuron/wan/hbm.py``, ``_check_components_fit``).
 
-        The estimate depends on the TP degree and the checkpoint's sizes, not on the mode flags.
-        CFG and CP on four cores, DP replicas of tp2 and a plain tp2 all narrow the TP group the
-        same way. At tp2 that is at least 10.6 GiB of fp32 encoder beside 13.3 GiB of bf16 DiT on
-        a 24 GiB core. Both experts count when Wan 2.2's low-noise expert is resident.
+        The estimate depends on the TP degree, the checkpoint's sizes and umT5's load dtype
+        (``encoder_dtype``), not on the mode flags. CFG and CP on four cores, DP replicas of tp2
+        and a plain tp2 all narrow the TP group the same way. At tp2 that is at least 10.6 GiB of
+        fp32 encoder (5.3 GiB in bf16) beside 13.3 GiB of bf16 DiT on a 24 GiB core. Both experts
+        count when Wan 2.2's low-noise expert is resident.
         """
         experts = tuple(
             name
@@ -389,9 +415,11 @@ class TorchNeuronWanApplication(TorchNeuronModelApplication):
                               ("transformer_2", self.transformer_2))
             if app is not None
         )
+        label = {torch.float32: "fp32", torch.bfloat16: "bf16"}[encoder_dtype]
         self._check_components_fit(
-            device_text_encoder_components(experts, self.dtype.itemsize),
-            what=f"umT5 (fp32) beside the Wan DiT ({', '.join(experts) or 'none'}) on one core",
+            device_text_encoder_components(experts, self.dtype.itemsize,
+                                           text_encoder_dtype_bytes=encoder_dtype.itemsize),
+            what=f"umT5 ({label}) beside the Wan DiT ({', '.join(experts) or 'none'}) on one core",
             advice="encode on the host (text_encoder_device='host', --host-text-encoder), or "
             "give the TP group more cores (tp_degree={tp} or more)",
         )

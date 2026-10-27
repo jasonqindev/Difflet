@@ -1,10 +1,11 @@
 """Whether Wan's umT5 fits on the device beside the DiT at a given tp. Torch-free.
 
 ``NeuronWanTextEncoderApplication`` puts umT5 on every rank of the TP group in fp32 (22.7 GB for
-the 5.68 B-parameter encoder, sharded across the group) next to this rank's DiT shard. At tp4 that
-is about 5.3 GiB of encoder beside 8.1 GiB of DiT, well inside 24 GiB. Any topology that leaves
-fewer cores to the TP group doubles both: CFG or context parallelism on four cores, or DP replicas
-of tp2 (dp2tp2), each core then holding about 10.6 GiB of encoder and 14 GiB of DiT. That is more
+the 5.68 B-parameter encoder, sharded across the group; half that with the bf16 opt-in,
+``text_encoder_dtype_bytes=2``) next to this rank's DiT shard. At tp4 that is about 5.3 GiB of
+encoder beside 8.1 GiB of DiT, well inside 24 GiB. Any topology that leaves fewer cores to the TP
+group doubles both: CFG or context parallelism on four cores, or DP replicas of tp2 (dp2tp2),
+each core then holding about 10.6 GiB of encoder and 14 GiB of DiT. That is more
 than its HBM, and the device would only find out after minutes of allocator retries
 (``difflet/backends/neuron/hbm.py``).
 
@@ -24,16 +25,21 @@ from pathlib import Path
 
 from difflet.backends.neuron.hbm import Component, components_bytes, components_fit
 
-#: umT5 runs in fp32 on the device whatever the DiT's dtype (``NeuronWanTextEncoderApplication``).
+#: umT5 runs in fp32 on the device unless ``text_encoder_dtype`` asks for bf16
+#: (``NeuronWanTextEncoderApplication``; the CLI's ``--text-encoder-dtype``).
 TEXT_ENCODER_DTYPE_BYTES = 4
 TEXT_ENCODER = Component("text_encoder", TEXT_ENCODER_DTYPE_BYTES)
 
 
 def device_text_encoder_components(experts: tuple[str, ...] = ("transformer",),
-                                   dit_dtype_bytes: int = 2) -> tuple[Component, ...]:
-    """umT5 and the DiT ``experts`` (the checkpoint subdirectories that stay resident with it:
-    ``("transformer",)``, plus ``"transformer_2"`` for Wan 2.2's low-noise expert, or none)."""
-    return (TEXT_ENCODER, *(Component(name, int(dit_dtype_bytes)) for name in experts))
+                                   dit_dtype_bytes: int = 2, *,
+                                   text_encoder_dtype_bytes: int = TEXT_ENCODER_DTYPE_BYTES,
+                                   ) -> tuple[Component, ...]:
+    """umT5 (at ``text_encoder_dtype_bytes`` per parameter: 4 in fp32, 2 in bf16) and the DiT
+    ``experts`` (the checkpoint subdirectories that stay resident with it: ``("transformer",)``,
+    plus ``"transformer_2"`` for Wan 2.2's low-noise expert, or none)."""
+    encoder = Component("text_encoder", int(text_encoder_dtype_bytes))
+    return (encoder, *(Component(name, int(dit_dtype_bytes)) for name in experts))
 
 
 def device_text_encoder_bytes(
@@ -42,11 +48,13 @@ def device_text_encoder_bytes(
     tp_degree: int,
     experts: tuple[str, ...] = ("transformer",),
     dit_dtype_bytes: int = 2,
+    text_encoder_dtype_bytes: int = TEXT_ENCODER_DTYPE_BYTES,
 ) -> int:
     """Lower bound of one rank's weight bytes with umT5 on the device beside the DiT ``experts``,
     all sharded over ``tp_degree``."""
-    return components_bytes(model_dir, device_text_encoder_components(experts, dit_dtype_bytes),
-                            tp_degree=tp_degree)
+    components = device_text_encoder_components(
+        experts, dit_dtype_bytes, text_encoder_dtype_bytes=text_encoder_dtype_bytes)
+    return components_bytes(model_dir, components, tp_degree=tp_degree)
 
 
 def device_text_encoder_fits(
@@ -55,11 +63,13 @@ def device_text_encoder_fits(
     tp_degree: int,
     experts: tuple[str, ...] = ("transformer",),
     dit_dtype_bytes: int = 2,
+    text_encoder_dtype_bytes: int = TEXT_ENCODER_DTYPE_BYTES,
 ) -> tuple[bool, int, int]:
     """``(fits, estimate, limit)``: the ``device_text_encoder_bytes`` estimate against
     ``FIT_FRACTION`` of one core's HBM."""
-    return components_fit(model_dir, device_text_encoder_components(experts, dit_dtype_bytes),
-                          tp_degree=tp_degree)
+    components = device_text_encoder_components(
+        experts, dit_dtype_bytes, text_encoder_dtype_bytes=text_encoder_dtype_bytes)
+    return components_fit(model_dir, components, tp_degree=tp_degree)
 
 
 __all__ = [
