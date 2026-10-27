@@ -5,7 +5,7 @@
 - **LTX-2 native:** a full cell under cold definition A, measured in phase 2.
 - **Qwen-Image, HunyuanVideo and Wan2.1 native:** numbers reused from earlier cells on this host. Phase 2 confirmed them at the current branch HEAD by bit-identical outputs (plan D10, option A).
 
-PSNR / SSIM: **Qwen-Image and LTX-2 have numbers** (phase 4, two 50-step CPU fp32 references each, sections "Phase 4: Qwen-Image CPU fp32 references" and "Phase 4: LTX-2 CPU fp32 references", collected with the tool sanity checks and a look at the references in "Quality vs CPU fp32 reference (part 1)"). Wan2.1 (both backends, one shared reference) and HunyuanVideo native have numbers too (section "Quality vs CPU fp32 reference (part 2)"). **HunyuanVideo AoT is pending** its AoT-noise CPU reference, which runs on the next machine. Cold e2e is definition A throughout. Definition B (native without its weight store, Wan2.1 and LTX-2 only) comes later (plan phase 6).
+PSNR / SSIM: **Qwen-Image and LTX-2 have numbers** (phase 4, two 50-step CPU fp32 references each, sections "Phase 4: Qwen-Image CPU fp32 references" and "Phase 4: LTX-2 CPU fp32 references", collected with the tool sanity checks and a look at the references in "Quality vs CPU fp32 reference (part 1)"). Wan2.1 (both backends, one shared reference) and HunyuanVideo native have numbers too (section "Quality vs CPU fp32 reference (part 2)"). **HunyuanVideo AoT is pending** its AoT-noise CPU reference, which runs on the next machine. Cold e2e is definition A in the tables above. Definition B (native without its weight store, Wan2.1 and LTX-2 only, plan phase 6) was measured on 2026-10-27 on a replacement host with the same root volume: Wan2.1 762.55 s and LTX-2 785.40 s, against A 533.89 s and 603.23 s on that host (section "2026-10-27, new host").
 
 **Device:** trn2.3xlarge: 1 device, 4 NeuronCores (LNC=2, 24 GiB HBM per core), 12 vCPU, 124.8 GiB RAM, one EBS root volume. The host is the same one used for `native_vs_aot_tp4_2026-10-25.md`.
 
@@ -41,7 +41,7 @@ All values were re-read from the run records (`summary.json`, `stats_gen1-3.txt`
 | Wan2.1 14B, 480x832x9, g5.0 (CFG) | native | 1063.6 ms | 128.5 s | 542.7 s (weight store) | 600.3 s | 15.15 GiB on the DiT cores, 18.40 on the VAE core | 22.66 dB / 0.885 (latent cosine 0.967), against the one CPU fp32 reference both backends share (same noise) | *reused*: 2026-10-25 at `8b2408c`, `/home/ubuntu/bench-2026-10-25/wan2_1/native_tp4/`. Confirmed by hash on 2026-10-26 at `4f5d46a`: `B/wan2_1/native_tp4_hashcheck/` |
 | | AoT | 956.4 ms | **123.16 s** with `--host-vae` (A2) | **449.4 s** with `--host-vae` (A2) | 5935.7 s (the transformer stage alone: 430.5 s) | 10.34 GiB | 21.40 dB / 0.853 (latent cosine 0.954) for the A2 host fp32 decode, against the same shared reference. The device-VAE frames are corrupted: 11.72 dB / 0.321 against the reference, 12.41 dB against a host fp32 decode | 2026-10-26 at main `540e5f0`: `B/wan2_1/aot_main_tp4_twocore/` and `…_hostvae/` |
 | LTX-2, 480x704x49, g1.0 | native | 350.5 ms | 92.46 s | 594.76 s (Gemma-3 weight store) | 327.59 s | 16.51-16.52 GiB | 18.06 dB / 0.811 (latent cosine 0.930 video, 0.989 audio), against the CPU fp32 reference from native's noise | 2026-10-26: compile at `999c434`, the other runs at `009d3dd`. `B/ltx_2/native_tp4/` |
-| | AoT | 400.1 ms | 66.55 s | 778.1 s | 1052.2 s | 9.81 GiB | 16.21 dB / 0.660 (latent cosine 0.725 video, 0.980 audio), against the CPU fp32 reference from AoT's noise. Far below the 2026-10-24 single-core 20-step run (cosine 0.991); not yet explained, see the LTX-2 phase 4 section | 2026-10-26 at main `540e5f0`: `B/ltx_2/aot_main_tp4_twocore/` |
+| | AoT | 400.1 ms | 66.55 s | 778.1 s | 1052.2 s | 9.81 GiB | 16.21 dB / 0.660 (latent cosine 0.725 video, 0.980 audio), against the CPU fp32 reference from AoT's noise. Far below the 2026-10-24 single-core 20-step run (cosine 0.991). Not two-core attention: a two-core 20-step run on 2026-10-27 is byte-identical to that single-core run (cosine 0.9907, 35.45 dB / 0.979 against the 20-step reference), so the drop comes with the 50 steps (section "2026-10-27, new host") | 2026-10-26 at main `540e5f0`: `B/ltx_2/aot_main_tp4_twocore/` |
 
 **Native vs AoT**, computed as (native − AoT) / AoT from the unrounded run values:
 
@@ -1107,6 +1107,152 @@ Tooling only, 2026-10-26 23:50 to 2026-10-27 00:50 UTC. No 50-step reference has
 - The known differences from the reference all remain: bf16 DiT and VAE on the device, the DiT guidance 6016 against 6000, bf16 timesteps, and the native text encoders in bf16 on the host. One seed, so this is one sample, not a distribution.
 - The matched pair is 11.4 dB and 0.40 SSIM above the mismatched-noise control, which confirms the pairing.
 
+## 2026-10-27, new host (same root volume): LTX-2 AoT 20-step diagnostic and cold definitions A and B
+
+**Host:** a replacement trn2.3xlarge, with the same instance type, LNC=2, aws-neuronx-runtime-lib 2.35.30.0 and venvs. The **same EBS root volume** was re-attached to it, so the data, venvs, compiled roots and HF cache are the ones used above. The volume is gp3 at 3000 IOPS / 125 MB/s, as before, and it is not a fresh snapshot restore (it was created on 2026-10-23), so there is no first-read penalty.
+
+**Preflight** (17:10 UTC):
+- `fuser /dev/neuron*` was empty, and stayed empty before every run; no wait was needed.
+- `neuron-ls`: 1 device, 4 cores.
+- 130 GB free on `/`, 122 GiB MemAvailable.
+
+**Device phase:** one `systemd-run --user` unit, `device_1027`, ran `B/scripts/job_device_1027.sh` (`6331dda6…`), five runs one after the other, 17:12:53–18:10:24 UTC (log `B/device_1027.log`).
+- All five runs returned rc 0 and released the device (`device_released: true`).
+- The roots were listed before and after the phase (`B/device_1027_prep/roots_{before,after}.txt`, from `roots_snapshot_1027.sh`). The NEFF counts, file counts and newest file are unchanged in all three roots: no run compiled a NEFF or wrote to a weight store.
+
+### LTX-2 AoT two-core at 20 steps (diagnostic, quality only)
+
+**Question:** the 50-step two-core AoT q1 scored video latent cosine 0.725 against its CPU fp32 reference, while the 2026-10-24 single-core 20-step run scored 0.991 (LTX-2 phase 4 section). Is the drop caused by the 50 steps, or by two-core attention?
+
+**Run:** `B/ltx_2/aot_main_tp4_twocore_steps20_1027/q1`, 17:12:54–17:25:30 UTC, main `540e5f0` (clean), `difflet` from `/home/ubuntu/aot-main` (precheck and probe).
+- It is identical to the q1 run of `aot_main_tp4_twocore`, apart from the step count:
+  - the same root `B/roots/ltx_2_aot_main_tp4_twocore` (`--root-cell`), loading its existing two-core NEFF (`MODULE_e1043f48…`, `attention_cte_lnc0` with grid 2);
+  - `NEURON_RT_VIRTUAL_CORE_SIZE=2`, `DIFFLET_BACKEND=trainium`, `--tp-degree 4 --cp-degree 1`, 480x704x49, guidance 1.0, seed 42, the same prompt;
+  - lossless `out.pt`, plus main's `DIFFLET_DUMP_LATENTS_DIR` and `DIFFLET_STEP_TIMES_FILE`.
+- **How 20 steps were run:** `bench4m.py` hardcodes `--steps 50`. A copy, `B/scripts/bench4m_steps.py` (`3e48846e…`), sits beside it. Its only change is a `--steps N` option (default 50) that replaces the hardcoded value and is recorded as `steps_arg` in `summary.json`. `bench4m.py` (`6c52b12e…`) was left as used. A dry run showed the command equal to q1's apart from `--steps 20` and the run paths.
+- **Timing (not a figure):** `steps.jsonl` has 20 rows, median 401.6 ms, the two-core speed (q1 at 50 steps: 400.8 ms; single-core 433.5 ms). Peak HBM 9.75 GiB per core. The 754.1 s wall is a first run on an empty page cache, so it is not used as a timing figure.
+
+**Noise:** `initial_video.pt` `4458e4cf…` and `initial_audio.pt` `8e52babb…` are bit-identical (`torch.equal` and file sha256) to the 50-step two-core q1 dumps and to the 2026-10-24 single-core run (`B/ltx_2/diag20_1027/initial_noise_check.json`).
+
+**Result: two-core attention is not the cause.**
+- The run's `final_video.pt` (`b426bc92…`) and `final_audio.pt` (`512298a5…`) are **byte-identical** to the 2026-10-24 single-core 20-step run (`/home/ubuntu/campaign/bf16-reduce/runs/ltx2/bf16/warm1/`): same file sha256, and `torch.equal` is true for both.
+- So at 20 steps, two-core and single-core attention give the same bits, and the 50-step gap comes from running 50 steps rather than from the attention split.
+
+**Metrics** (`B/scripts/quality_ltx2_diag20_1027.sh`, `2ec1b904…`; `quality_metrics.py` `8f6e1b18…` with part 1's definitions, selftest PASS; output `B/ltx_2/diag20_1027/`)
+
+| pair (same noise) | PSNR mean (worst frame) | SSIM mean (worst frame); R / G / B | video latent rel-L2 / cosine | audio latent rel-L2 / cosine | file |
+|---|---:|---:|---:|---:|---|
+| **AoT two-core, 20 steps (2026-10-27) vs CPU fp32 `xcheck_aot_noise_20`** | **35.45 dB** (33.44, frame 48) | **0.979** (0.970, frame 48); 0.980 / 0.978 / 0.978 | 0.140 / **0.9907** | 0.035 / **0.9994** | `aot_twocore20_vs_ref20.json` |
+| known: 2026-10-24 single-core 20-step device vs the same reference | latents only | | 0.140 / 0.9907 | 0.035 / 0.9994 | `known_singlecore20_vs_ref20.json` |
+| two-core 20 vs single-core 20, device vs device | | | 0 / 1.000 | 0 / 1.000 | `twocore20_vs_singlecore20.json` |
+| for scale: AoT two-core q1, 50 steps vs `ref_aot_noise_50` (part 1) | 16.21 dB | 0.660 | 0.786 / 0.725 | 0.335 / 0.980 | `known_twocore50_vs_ref50.json` |
+| sanity: `xcheck_aot_noise_20` vs itself | inf | 1.000 | 0 / 1.000 | 0 / 1.000 | `sanity_identical_ref20.json` |
+
+- The 20-step frames are compared losslessly (`out.pt` `347910e6…` against the reference's fp32 `out.pt`, all 49 frames). The 34.14 dB recorded for 2026-10-24 was mp4 against mp4.
+- **Content:** I opened the strips of frames 0, 12, 24, 36 and 48 (`strip_diag20_…png`, `strip_ref20_…png`). They match frame for frame: a snowy conifer forest under a blue sky, a dark animal shape, a red-brown blob and spraying snow. Both are only loosely on prompt, which is the guidance-1.0 workload.
+
+**Conclusion.** At 20 steps, the two-core AoT run is near 0.99 (video cosine 0.9907, audio 0.9994, 35.5 dB, SSIM 0.979), and it is bit-identical to single-core. The 0.725 at 50 steps is therefore a property of the 50-step bf16 trajectory from this noise, not of two-core attention.
+- *Inference, not tested:* a single-core 50-step run would give the same bits as the two-core one, since the two are bit-identical at 20 steps with the same kernels per step.
+- What stays open is why this noise's 50-step bf16 trajectory drifts so far from fp32 (video cosine 0.725), while LTX-2 native at 50 steps reaches 0.930 from other noise. One seed per backend cannot separate the noise from the backend. The planned CPU bf16 vs fp32 baseline (plan, "Added 2026-10-27") measures exactly this: a CPU bf16 run from the same AoT noise against `ref_aot_noise_50`.
+
+### Cold e2e, definitions A and B (native Wan2.1 and LTX-2, plan phase 6)
+
+**Runs:**
+- Native backend at HEAD `9d425d5` (clean). The difflet code is identical to `4f5d46a` and `009d3dd`, the commits of the Wan hash check and the LTX-2 cell (`git diff --stat … -- difflet` is empty).
+- Flags as in the earlier cells: `--backend neuron --tp-degree 4`, plus the harness's 50 steps, guidance, seed 42 and prompt. The dtypes are unchanged: Wan umT5 and VAE in fp32, Gemma-3 in bf16 on the device.
+- Each run is one cold generate through `bench4m.py` `--drop-cache`:
+  - `sync; drop_caches`, which left `Cached` at 0.35 GiB with the checkpoint 0% resident in every run;
+  - a fresh process and a fresh work dir;
+  - all weights read from disk inside the timed run.
+- **A:** the existing store (Wan: `B/roots/wan21_native_tp4_copy1025`, DiT bf16 store; LTX-2: `B/roots/ltx2_native_tp4`, Gemma-3 bf16 store).
+- **B:** `DIFFLET_NEURON_WEIGHT_STORE=0` on the same roots, so the original checkpoints are read and nothing is written.
+  - The B run logs have no `[weight store]` line, against 9 (Wan) and 7 (LTX-2) in A.
+  - Wan B reads the fp32 transformer checkpoint and casts it to bf16. LTX-2 B reads the Gemma-3 checkpoint.
+- New cells, so nothing existing was overwritten: `B/{wan2_1,ltx_2}/native_tp4_{A,B}_1027/cold/`. One run each; none looked anomalous (below).
+
+| model | run | wall e2e | vs old-host A | B vs A | output | peak HBM per core |
+|---|---|---:|---:|---:|---|---|
+| Wan2.1 | **A** (2026-10-27) | **533.89 s** | −8.85 s (−1.6%) against 542.74 s | | mp4 `9b914e81…`, latents `3cafa271…` | 15.15 GiB DiT cores, 18.38 VAE core |
+| Wan2.1 | **B** (2026-10-27) | **762.55 s** | | **+228.66 s (+42.8%)** | the same mp4 and latents | 15.15 / 18.06 GiB |
+| LTX-2 | **A** (2026-10-27) | **603.23 s** | +8.47 s (+1.4%) against 594.76 s | | mp4 `cd11731b…`, latents `b9c745bd…` | 16.51–16.52 GiB |
+| LTX-2 | **B** (2026-10-27) | **785.40 s** | | **+182.17 s (+30.2%)** | the same mp4 and latents | 16.52 GiB |
+
+- **Outputs:**
+  - Wan2.1 A and B both give the mp4 and `work/latents.pt` of the 2026-10-25 reference cell and of the 2026-10-26 hash check.
+  - LTX-2 A and B both give those of every run of `native_tp4` (cold, gen0-3).
+  - So B produces exactly the output of A for both models: reading the original checkpoint and casting on load gives the same bf16 weights as the store.
+- **The hosts are comparable.** A on this host is within 1.6% of the old host's A, and the components match to the second:
+  - Wan: DiT store read 217.41 vs 217.04 s, umT5 172.56 vs 172.52 s.
+  - LTX-2: Gemma-3 store 178.78 vs 178.78 s, DiT checkpoint 287.34 vs 286.55 s.
+  - The differences are start-up and one in-run compile (tables below).
+- **Against AoT cold** (`*` = against Wan2.1 AoT A2 `--host-vae`, 449.4 s):
+
+  | model | AoT cold | native A on this host | native B |
+  |---|---:|---:|---:|
+  | Wan2.1 | 449.4 s* | +18.8%* | **+69.7%*** |
+  | LTX-2 | 778.1 s | −22.5% | **+0.9%** |
+
+  - Under B, native LTX-2 cold is level with AoT's, and native Wan2.1 cold is 1.7x AoT's. AoT cold always reads its bf16 pre-shards; AoT has no B.
+
+**Wan2.1 cold breakdown** (rank 0 probe spans and the app phase seconds, seconds from driver start; `B/device_1027_prep/breakdown_wan.json` from `breakdown_1027.py` `6558d7ab…`)
+
+| part | A, old host (2026-10-25, `8b2408c`) | **A** (2026-10-27) | **B** (2026-10-27) |
+|---|---:|---:|---:|
+| driver start to rank start (torchrun) | 14.59 | 15.06 | 15.26 |
+| rank imports and set-up, to the load | 24.77 | 18.28 | 27.52 |
+| load (`app_load`) | 410.30 | 411.28 | **629.14** |
+| — DiT weights | 217.04 (store) | 217.41 (store; every rank `hit 7.50 GB` in 216.0–217.4 s) | **435.07** (fp32 checkpoint, cast to bf16) |
+| — umT5 checkpoint (fp32) | 172.52 | 172.56 | 172.53 |
+| — warm-up forwards, DiT / umT5 | 13.44 / 4.88 | 13.95 / 4.86 | 13.91 / 4.90 |
+| load end to encode (in-run NEFF compile) | 6.43 | 0.06 | 0.07 |
+| encode (cond + uncond) | 2.23 + 0.09 | 1.95 + 0.09 | 1.97 + 0.10 |
+| denoise, 50 steps (step median) | 53.25 (1062.4 ms) | 53.39 (1064.7 ms) | 53.40 (1065.5 ms) |
+| generate ranks exit | 511.6 | 500.03 | 727.39 |
+| VAE launch: load / decode / save (stage) | 9.65 / 7.77 / 0.50 (20.98) | 11.01 / 7.93 / 0.50 (22.72) | 10.20 / 8.47 / 0.54 (22.92) |
+| **harness wall** | **542.74** | **533.89** | **762.55** |
+
+**LTX-2 cold breakdown** (`B/device_1027_prep/breakdown_ltx_{A,B}.json`)
+
+| part | A, old host (2026-10-26, `009d3dd`) | **A** (2026-10-27) | **B** (2026-10-27) |
+|---|---:|---:|---:|
+| driver start to rank start (torchrun) | 14.86 | 15.53 | 15.45 |
+| rank imports and set-up, to the DiT load | 14.15 | 19.45 | 21.11 |
+| DiT load: bf16 checkpoint / build on meta / warm-up (span) | 286.55 / 9.87 / 12.86 (310.18) | 287.34 / 10.61 / 13.26 (312.14) | 287.23 / 10.10 / 13.11 (311.34) |
+| Gemma-3 load: weights / warm-up (span) | 178.78 store / 1.36 (180.21) | 178.78 store / 1.42 (180.29; rank 0 `hit 5.88 GB` in 177.7 s) | **358.32 checkpoint** / 1.44 (**359.84**) |
+| prompt encode (connectors) | 25.31 (24.95) | 25.40 (25.04) | 25.53 (25.17) |
+| denoise, 50 steps (step median) | 17.56 (350.8 ms) | 17.59 (351.6 ms) | 17.60 (351.8 ms) |
+| generate stage ends | 568.30 | 576.80 | 757.75 |
+| host decode: pipeline load / decode / save (total) | 3.01 / 19.30 / 0.73 (25.41) | 3.07 / 19.07 / 0.74 (25.36) | 3.31 / 19.56 / 0.78 (26.31) |
+| **harness wall** | **594.76** | **603.23** | **785.40** |
+
+- **Reading the breakdowns:**
+  - B adds exactly the difference between reading the original checkpoint and reading the store: Wan DiT 435.07 − 217.41 = 217.7 s of the 228.7 s; LTX-2 Gemma-3 358.32 − 178.78 = 179.5 s of the 182.2 s. The rest is start-up spread.
+  - The earlier estimates (Wan DiT 217 vs 435 s; Gemma-3 178.5 vs 358 s, plan addendum) are confirmed.
+  - Denoise, encode and decode are the same under A and B.
+- **Against the old host:**
+  - Wan2.1 A is 8.85 s faster. The old run spent 6.43 s on a small NEFF compile between load and encode; that NEFF now exists in the root copy (the hash check wrote it on 2026-10-26), so this run compiled nothing. Its ranks also reached the load 6.5 s sooner.
+  - LTX-2 A is 8.47 s slower:
+    - 6.0 s of it comes before the DiT load: 19.45 vs 14.15 s from rank start, plus 0.7 s in the driver launch. This is the torchrun start-up jitter already seen in the LTX-2 warm runs (19.2–22.7 s).
+    - The other 2.5 s is spread over the DiT load (+2.0 s) and the encode, denoise and decode, each within 0.3 s.
+- No run was repeated: every component time agrees with the old host or with the expected checkpoint read, and the outputs are bit-identical.
+
+**Decisions on this host** (problem, choice, reason)
+1. **20 steps without editing the as-used harness.** Problem: `bench4m.py` hardcodes `--steps 50`, and a duplicate `--steps` in the cell flags would be overridden by the later one. Choice: a copy `bench4m_steps.py` with a `--steps` option that defaults to 50, plus a dry run to compare the command with q1's. Reason: the as-used harness stays byte-identical (`6c52b12e…`), and the change is one recorded option.
+2. **The diagnostic ran first, on the empty page cache, without `--drop-cache`.** Reason: it is quality only, and its outputs depend only on the inputs. Its wall time is not reported as a figure.
+3. **Metrics after the device phase.** The frame metrics ran only after the last timed run (18:11 UTC, as a user unit). Exception: a latent-only check of about 5 s ran at about 17:26, during Wan A's disk-bound load; its effect is negligible, and Wan A's load components equal the old host's to 0.4 s.
+4. **A and B on the existing roots, in new cells.** Reason: definitions A and B differ only in the env switch. The roots were checked unchanged after the phase, and the earlier cells are untouched.
+5. **One run per definition.** Reason: no run was anomalous (above).
+6. **HunyuanVideo AoT CPU reference started right after the device phase** (18:12:52 UTC, before the 19:30 limit), after the diagnostic metrics had finished, so that the reference had the host to itself.
+
+### HunyuanVideo AoT-noise CPU reference (started)
+
+- **Unit:** `systemd-run --user --unit=cpuref_hv_aot --collect -- bash B/scripts/job_cpu_ref_queue_wan_hv.sh`, started 18:12:52 UTC.
+  - The queue skipped `wan2_1/ref_50` (rc 0) and `hunyuan_video/ref_native_noise_50` (rc 0), and started `hunyuan_video/ref_aot_noise_50` (`B/cpu_ref_queue_wan_hv.log`).
+- **At start:** MemAvailable 121 GiB; `neuron_users` empty; `cpu_ref_hv.py` `a4c90338…`.
+- **Input:** the AoT bf16 noise `aot_main_tp4/q1/initial.pt`. The script's `--expect-initial-file-sha e13a3f46…` check passed: it reached `initial_loaded`.
+- **Expected:** about 4.1 h, so it should finish around 22:20 UTC. The bit-exact first-DiT-input check is written to `reference.json` at the end.
+- **Then:** the AoT row of part 2 (`quality_part2_hv.sh` pattern, AoT q1 against it).
+
 ## Next
 
 - **Phase 4 (CPU):** the 7 references, 50 steps each, in fp32, Qwen-Image and LTX-2 first. Inputs:
@@ -1130,7 +1276,7 @@ Tooling only, 2026-10-26 23:50 to 2026-10-27 00:50 UTC. No 50-step reference has
     - Native frames: `B/wan2_1/native_tp4_hashcheck/q1/out.pt`.
     - AoT frames: use the fp32 host decode `B/wan2_1/aot_main_tp4_twocore/q1_host_vae/host_fp32_frames.pt`, which is the A2 placement, because the device-VAE frames are corrupted.
 - **Phase 5:** PSNR / SSIM fill the last column of the summary table. Part 1 (Qwen-Image and LTX-2) is **done**: section "Quality vs CPU fp32 reference (part 1)". Part 2: Wan2.1 and HunyuanVideo native **done** (section "Quality vs CPU fp32 reference (part 2)"); HunyuanVideo AoT waits for `ref_aot_noise_50` on the next machine.
-- **Phase 6:** definition B, native cold without the weight store, for Wan2.1 and LTX-2.
+- **Phase 6:** definition B, native cold without the weight store, for Wan2.1 and LTX-2: **done** 2026-10-27 on the new host (section "2026-10-27, new host"), together with the LTX-2 AoT two-core 20-step diagnostic. `hunyuan_video/ref_aot_noise_50` started there at 18:12:52 UTC (unit `cpuref_hv_aot`).
 - **Follow-up on main:** the compiled bf16 Wan VAE (`trainium/wan/vae.py`) corrupts frames on the device. Wan2.2 on 2026-10-24 shows the same kind of corruption.
 
 ## Toolchain
