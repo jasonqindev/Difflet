@@ -119,9 +119,9 @@ footer { border-top: 1px solid var(--rule); padding-top: 16px; font-size: 0.85re
 <section aria-label="当前状态">
   <div class="status">
     <div class="card"><span class="chip wait">换机器</span><p class="big">10-27 约 11:00 终止</p><p class="muted">这台机器约 11:00 UTC 终止。接手步骤见下方“交接”一节和仓库里的 <span class="mono">docs/superpowers/plans/2026-10-27-handoff.md</span>。</p></div>
-    <div class="card"><span class="chip run">运行中（本机）</span><p class="big">CPU 参考（二）</p><p class="muted">Wan ×1 在 10-27 05:15 跑到第 47/50 步，约 05:35 完成，然后马上算 Wan 的画质。接着跑 HunyuanVideo native 噪声这一份（约 4 h，预计 09:45 完成），再算它的画质。</p></div>
+    <div class="card"><span class="chip run">运行中（本机）</span><p class="big">CPU 参考（二）</p><p class="muted">Wan 参考 05:33 完成，画质已出（见下方）。HunyuanVideo native 噪声参考 05:33 开始，预计 09:30 完成，然后算它的画质。EBS 快照 <span class="mono">snap-0be904d664c6beefe</span>（05:29 开始）正在拍。</p></div>
     <div class="card"><span class="chip todo">移到新机器</span><p class="big">HV AoT 参考及之后</p><p class="muted">HunyuanVideo AoT 噪声参考（约 4 h）在本机跑不完，移到新机器。之后依次是：LTX-2 AoT 诊断、口径 B、第 3 批、最后一步，以及 CPU bf16 基准。</p></div>
-    <div class="card"><span class="chip done">已完成</span><p class="big num">8 / 8</p><p class="muted">设备测量的 8 格全部完成；CPU 参考 5 / 7 份完成（Qwen ×2、LTX-2 ×2、Wan ×1）；画质已出 Qwen、LTX-2，Wan 马上出</p></div>
+    <div class="card"><span class="chip done">已完成</span><p class="big num">8 / 8</p><p class="muted">设备测量的 8 格全部完成；CPU 参考 5 / 7 份完成（Qwen ×2、LTX-2 ×2、Wan ×1）；画质已出 Qwen、LTX-2、Wan，只差 HunyuanVideo</p></div>
   </div>
 </section>
 
@@ -311,8 +311,8 @@ footer { border-top: 1px solid var(--rule); padding-top: 16px; font-size: 0.85re
         <tr><td><strong>LTX-2 native</strong>（双 core）</td><td class="num">350.5 ms<br><span class="muted">p10 349.4 / p90 352.0</span></td><td class="num">92.5 s<br><span class="muted">94.4 / 92.2 / 90.8</span></td><td class="num">594.8 s（A）<br><span class="muted">DiT 加载 310.2 · Gemma 从 store 读 180.2 · 编码 25.3 · 去噪 17.6 · 主机解码 25.4</span></td><td class="num">327.6 s</td><td class="num">16.52 GiB<br><span class="muted">Gemma 也在设备上</span></td><td class="num"><strong>18.06 dB / 0.811</strong><br><span class="muted">视频潜变量余弦 0.930</span></td><td class="num muted">10-26 · 第 2c 批</td></tr>
         <tr><td><strong>HunyuanVideo AoT</strong>（双 core）</td><td class="num">801.8 ms<br><span class="muted">p10 800.9 / p90 802.5</span></td><td class="num">133.0 s<br><span class="muted">134.7 / 131.7 / 132.6</span></td><td class="num">617.5 s<br><span class="muted">CLIP 26.4 · Llama 134.6 · DiT+VAE 加载 385.0 · 去噪 40.3 · 解码 17.1</span></td><td class="num">4526.7 s<br><span class="muted">VAE 编译 3679 s（81%）</span></td><td class="num">15.53 GiB</td><td><span class="chip todo">待 CPU 参考</span></td><td class="num muted">10-26 · 第 2a 批</td></tr>
         <tr><td><strong>HunyuanVideo native</strong></td><td class="num">808.2 ms</td><td class="num">126.7 s</td><td class="num">457.8 s</td><td class="num">274.5 s</td><td class="num">17.95 GiB（rank 0）</td><td><span class="chip todo">待 CPU 参考</span></td><td class="num muted">10-26 复用；第 2b 批在当前代码上重跑，输出逐位一致 ✓</td></tr>
-        <tr><td><strong>Wan2.1 AoT</strong>（双 core）</td><td class="num">956.4 ms<br><span class="muted">p10 955.3 / p90 958.0</span></td><td class="num">123.2 s<br><span class="muted">主机 fp32 VAE（有效）；设备 bf16 VAE 是 106.0 s，但画面损坏</span></td><td class="num">449.4 s<br><span class="muted">主机 fp32 VAE；设备 bf16 VAE 是 432.3 s（画面损坏）</span></td><td class="num">5935.7 s<br><span class="muted">VAE 编译 5486 s；DiT 阶段 430.5 s</span></td><td class="num">10.34 GiB</td><td><span class="chip redo">设备 VAE 12.4 dB</span></td><td class="num muted">10-26 · 第 2b 批</td></tr>
-        <tr><td><strong>Wan2.1 native</strong></td><td class="num">1063.6 ms</td><td class="num">128.5 s</td><td class="num">542.7 s（A）</td><td class="num">600.3 s</td><td class="num">15.15 GiB</td><td><span class="chip todo">待 CPU 参考</span></td><td class="num muted">10-25 复用；第 2b 批在当前代码上重跑，输出逐位一致 ✓</td></tr>
+        <tr><td><strong>Wan2.1 AoT</strong>（双 core）</td><td class="num">956.4 ms<br><span class="muted">p10 955.3 / p90 958.0</span></td><td class="num">123.2 s<br><span class="muted">主机 fp32 VAE（有效）；设备 bf16 VAE 是 106.0 s，但画面损坏</span></td><td class="num">449.4 s<br><span class="muted">主机 fp32 VAE；设备 bf16 VAE 是 432.3 s（画面损坏）</span></td><td class="num">5935.7 s<br><span class="muted">VAE 编译 5486 s；DiT 阶段 430.5 s</span></td><td class="num">10.34 GiB</td><td class="num"><strong>21.40 dB / 0.853</strong><br><span class="muted">主机 fp32 VAE；潜变量余弦 0.954。设备 bf16 VAE：11.72 dB / 0.321（画面损坏）</span></td><td class="num muted">10-26 · 第 2b 批；画质 10-27</td></tr>
+        <tr><td><strong>Wan2.1 native</strong></td><td class="num">1063.6 ms</td><td class="num">128.5 s</td><td class="num">542.7 s（A）</td><td class="num">600.3 s</td><td class="num">15.15 GiB</td><td class="num"><strong>22.66 dB / 0.885</strong><br><span class="muted">潜变量余弦 0.967</span></td><td class="num muted">10-25 复用；第 2b 批在当前代码上重跑，输出逐位一致 ✓</td></tr>
       </tbody>
     </table>
     <div style="display:grid;gap:6px;margin-top:10px">
@@ -324,11 +324,17 @@ footer { border-top: 1px solid var(--rule); padding-top: 16px; font-size: 0.85re
           <tr><td>Qwen-Image</td><td>AoT</td><td class="num"><strong>21.48 dB</strong></td><td class="num"><strong>0.912</strong></td><td class="num"><strong>0.961</strong></td></tr>
           <tr><td>LTX-2</td><td>native</td><td class="num"><strong>18.06 dB</strong>（16.49）</td><td class="num"><strong>0.811</strong>（0.743）</td><td class="num"><strong>视频 0.930</strong> / 音频 0.989</td></tr>
           <tr><td>LTX-2</td><td>AoT</td><td class="num">16.21 dB（15.45）</td><td class="num">0.660（0.555）</td><td class="num">视频 0.725 / 音频 0.980</td></tr>
+          <tr><td>Wan2.1</td><td>native</td><td class="num"><strong>22.66 dB</strong>（20.32）</td><td class="num"><strong>0.885</strong>（0.840）</td><td class="num"><strong>0.967</strong></td></tr>
+          <tr><td>Wan2.1</td><td>AoT（主机 fp32 VAE）</td><td class="num">21.40 dB（18.98）</td><td class="num">0.853（0.797）</td><td class="num">0.954</td></tr>
+          <tr><td>Wan2.1</td><td>AoT（设备 bf16 VAE，损坏）</td><td class="num">11.72 dB（9.24）</td><td class="num">0.321（0.189）</td><td class="num">同上（潜变量相同）</td></tr>
+          <tr><td>Wan2.1</td><td>native 对 AoT 直接比</td><td class="num">25.20 dB（22.13）</td><td class="num">0.908（0.866）</td><td class="num">0.977</td></tr>
+          <tr><td>HunyuanVideo</td><td>native / AoT</td><td colspan="3"><span class="chip run">native 参考运行中，约 09:30 完成</span> AoT 参考在新机器上跑</td></tr>
         </tbody>
       </table></div>
       <ul style="margin:0;padding-left:1.2em">
         <li><strong>计算方法：</strong>无损输出转成 RGB uint8，逐帧算 PSNR，SSIM 按 Wang 2004（11×11 高斯窗，σ=1.5），再比最终潜变量的余弦。工具已自检：同一对图得到无穷大 dB、SSIM 1，并能复现两个已知结果。</li>
         <li><strong>Qwen-Image：native 比 AoT 低。</strong>两个参考图都符合 prompt（native 噪声那张的狐狸头部有些变形）。只有一个样本，差距里有多少来自噪声本身还不能确定；可能的原因（比如 native 的文本编码用 bf16、不带 mask）还没查。</li>
+        <li><strong>Wan2.1（画质二，10-27）：</strong>两个后端用同一份初始噪声，所以只有一份参考。参考画面是雪林里小跑的红狐，符合 prompt；native 和 AoT（主机 VAE）画面一致。native 略好（22.66 对 21.40 dB），两个后端彼此比各自和参考更接近（25.20 dB）。AoT 设备 VAE 只有 11.72 dB，比主机解码同一份潜变量低约 10 dB，确认是 VAE 的问题。第 0 帧在参考里也有彩色噪点，是模型本身的，所以它是每一行里最差的帧。参考耗时 4.68 h，峰值内存 62.6 GiB。</li>
         <li><strong>LTX-2：</strong>guidance 1 下 CPU 参考本身也偏糊、偏色，说明画面不清楚是这个 workload 本身造成的，不是设备的问题。native 输出和自己的参考很接近；<strong>AoT 输出比自己的参考差</strong>，有锡箔状的涂抹。10-24 单 core、20 步的 AoT 和参考的余弦是 0.991，这次只有 0.725；参考这一侧已排除（今天的脚本重跑 20 步，和 10-24 逐位相同），原因在设备侧：双 core 或 50 步，待诊断。</li>
       </ul>
       <p><strong>设备测量总结：native 相对 AoT</strong>（(native − AoT) / AoT，负数表示 native 更快或更小；Wan 的 AoT 端到端用主机 VAE 那组）</p>
@@ -395,6 +401,7 @@ footer { border-top: 1px solid var(--rule); padding-top: 16px; font-size: 0.85re
     <table>
       <thead><tr><th>时间</th><th>问题</th><th>采用的做法</th><th>原因</th></tr></thead>
       <tbody id="log-body">
+        <tr><td class="num">10-27 05:37</td><td>帮你拍 EBS 快照</td><td>你用 <span class="mono">aws login --remote</span> 登录后，核对卷 <span class="mono">vol-07f84bca0a53eb12a</span> 是本机（<span class="mono">i-0ae9ccae84b560655</span>，172.31.42.247）的根卷，你 05:29 已经拍了 <span class="mono">snap-0be904d664c6beefe</span>，我 05:37 又拍了一个；按你的意思删掉了我那个，只留你的。约 10:35 再拍一次增量快照，新机器用那一个</td><td>第一次拍 1.4 TB 的卷可能要几个小时；先拍一次复制大块数据，最后一次只复制改过的块，终止前来得及拍完。</td></tr>
         <tr><td class="num">10-27 05:20</td><td>保存测试数据：本机没有 AWS 凭证；上传到仓库 draft release 被权限检查拦下</td><td>你选了 EBS 快照：在约 10:35 UTC 之后（最终结果推送之后）、终止之前，给根卷做快照，新机器从快照起。本机的打包（<span class="mono">/home/ubuntu/handoff-out/</span>）也会保留在快照里，作为备份</td><td>仓库是公开的，上传数据算对外发布，要你同意。快照能把编译目录和模型缓存一起保留，新机器省掉几个小时的下载和编译。</td></tr>
         <tr><td class="num">10-27 05:20</td><td>新机器上测口径 B</td><td>在新机器上把口径 A 也重测一次，再和 B 比</td><td>冷启动受磁盘和机器影响，A 和 B 要在同一台机器上测才能比。</td></tr>
         <tr><td class="num">10-27 05:15</td><td>本机约 11:00 终止，剩下的两份 HunyuanVideo 参考（各约 4 h）跑不完</td><td>停掉原来的工作流（Wan 参考不受影响），挂一个串接任务：Wan 一结束就跑 HunyuanVideo native 噪声参考，预计 09:45 完成；AoT 噪声那份移到新机器。新工作流在 10:30 前算完 Wan 和 HV native 的画质并提交</td><td>能在终止前跑完的只有一份；先跑 native 这份，是因为 HunyuanVideo native 是这次的主角。设备上的诊断和口径 B 本来就要等参考跑完（内存不够），也放到新机器上。</td></tr>
