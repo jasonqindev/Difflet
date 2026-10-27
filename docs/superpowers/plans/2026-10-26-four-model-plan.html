@@ -118,7 +118,7 @@ footer { border-top: 1px solid var(--rule); padding-top: 16px; font-size: 0.85re
 
 <section aria-label="当前状态">
   <div class="status">
-    <div class="card"><span class="chip run">运行中</span><p class="big">CPU 参考（二）</p><p class="muted">Wan ×1、HunyuanVideo ×2，加上这两个模型的 PSNR / SSIM 和总报告。CPU 参考（一）已完成：Qwen、LTX-2 的画质结果见下方。</p></div>
+    <div class="card"><span class="chip run">运行中</span><p class="big">CPU 参考（二）</p><p class="muted">Wan ×1（10-27 01:23 时在第 5/50 步，每步约 315 s，预计 05:20 完成）→ HunyuanVideo ×2（各约 4 h）→ 画质指标和总报告，预计 10-27 14:00 左右出完整结果。比原先估计慢约 3 h。CPU 参考（一）已完成：Qwen、LTX-2 的画质结果见下方。</p></div>
     <div class="card"><span class="chip done">已完成</span><p class="big">F12</p><p class="muted">LTX-2 Gemma 加载问题已修复（05614a2），独立复查通过：在真实 snapshot 上 Gemma 的 626 个 key 全部能找到</p></div>
     <div class="card"><span class="chip reuse">可复用</span><p class="big num">12 / 48</p><p class="muted">格数据可以复用（HunyuanVideo、Qwen、Wan 的 native 计时）</p></div>
     <div class="card"><span class="chip todo">预计</span><p class="big num">≈ 28 h</p><p class="muted">主计划的总时间（设备约 13 h，CPU 参考约 14 h），约 22 h 出画质结果和报告；另有最后一步 VAE 分区域编译约 3 h，不急</p></div>
@@ -190,7 +190,7 @@ footer { border-top: 1px solid var(--rule); padding-top: 16px; font-size: 0.85re
       <div class="lane"><div class="ll">CPU 重任务<small>占满 CPU、内存和磁盘</small></div>
         <div class="track">
           <div class="bar cpuh" tabindex="0" data-s="7.5" data-d="5.3" data-tip="CPU 参考（一，已完成）：Qwen ×2、LTX-2 ×2，加上画质指标">Qwen、LTX-2 参考 ✓</div>
-          <div class="bar cpuh" tabindex="0" data-s="12.8" data-d="8.7" data-tip="CPU 参考：Wan ×1（约 2–2.5 h）、HunyuanVideo ×2（各约 3–3.8 h）">Wan、HV 参考</div>
+          <div class="bar cpuh" tabindex="0" data-s="12.8" data-d="8.7" data-tip="CPU 参考（二，运行中）：Wan ×1（实测每步约 315 s，约 4.4 h）、HunyuanVideo ×2（各约 4 h），合计约 12 h，比原先估计的 8.7 h 长">Wan、HV 参考（运行中）</div>
           <div class="bar cpul" tabindex="0" data-s="21.5" data-d="0.5" data-tip="算 PSNR / SSIM，写总报告">报告</div>
         </div></div>
       <div class="lane"><div class="ll">CPU 轻任务<small>和设备同时进行</small></div>
@@ -251,6 +251,8 @@ footer { border-top: 1px solid var(--rule); padding-top: 16px; font-size: 0.85re
       <div><ul><li>Wan 和 LTX-2 的 native 冷启动，关掉 weight store，从原始 checkpoint 读。放在第 3 批之前，和口径 A 用同样的 dtype。</li></ul></div></li>
     <li><div class="ph-head"><h3>第 3 批：bf16 改动并重测（含 umT5）</h3><span class="chip todo">待开始</span><span class="muted num">约 4.75 h · 设备</span></div>
       <div><ul><li>Qwen 和 Wan 的 VAE 改成 bf16，验证精度（≥ 50 dB）。</li><li>Wan 的 umT5 改成 bf16 前先过 F13 的精度检查：逐个 prompt 和 fp32 比（含空的 negative prompt，余弦 ≥ 0.995），再跑一次 50 步端到端；不通过就保留 fp32。</li><li>然后重测 Qwen 和 Wan 的 native，并把这部分结果作为补充写进报告。</li></ul></div></li>
+    <li><div class="ph-head"><h3>等新机器：CPU bf16 对 CPU fp32 的基准</h3><span class="chip wait">等新机器</span><span class="muted num">约 24 h · 只用 CPU</span></div>
+      <div><ul><li>同一个模型、同一份初始噪声，在 CPU 上用 bf16 跑一遍，再和 CPU fp32 参考比，看"只因为用了 bf16"本来会损失多少；设备做到这个水平，就等于没有额外误差。</li><li>范围：Qwen ×2（约 3.5 h）、LTX-2 ×2（约 3.6 h）、Wan ×1（约 6 h）、HunyuanVideo ×2（约 11 h），一份一份串行跑。</li><li>输入：设备保存的初始噪声、已有的 CPU fp32 参考和脚本（都在 <span class="mono">/home/ubuntu/bench-2026-10-26-4m/</span>），复制到新机器即可，不需要 Neuron 设备。这次不排进执行顺序。</li></ul></div></li>
     <li><div class="ph-head"><h3>最后一步：Wan / Qwen 的 native VAE 改成分区域编译</h3><span class="chip todo">最后做，不急</span><span class="muted num">约 3 h · CPU + 设备</span></div>
       <div><ul><li>照 HunyuanVideo F1a 的做法，把 Wan 的 VAE decoder（Qwen-Image 也用它）拆成区域编译，在第 3 批验证过 bf16 之后用 bf16。</li><li>原因：HunyuanVideo 改完后解码从 74 s（eager fp32）降到 16 s，VAE 冷编译从 1752 s 降到约 135 s，跑得和 AoT 整图编译一样快（17.1 s），却不用 AoT 一个多小时的 VAE 编译。</li><li>验收：解码画面和 fp32 主机解码比 ≥ 50 dB；分块逻辑在 CPU 上和 diffusers 对比；然后补测 Wan 和 Qwen native 的热、冷端到端。</li></ul></div></li>
   </ol>
@@ -353,6 +355,7 @@ footer { border-top: 1px solid var(--rule); padding-top: 16px; font-size: 0.85re
     <table>
       <thead><tr><th>时间</th><th>问题</th><th>采用的做法</th><th>原因</th></tr></thead>
       <tbody id="log-body">
+        <tr><td class="num">10-27</td><td>要不要补 CPU bf16 对 CPU fp32 的基准</td><td>你决定：加进计划，等新机器再跑，这次不执行</td><td>CPU 时间约 24 小时，现在这台机器的 CPU 和内存正被 fp32 参考占满。</td></tr>
         <tr><td class="num">10-26</td><td>LTX-2 AoT 的画质比 10-24 差很多，原因可能是双 core 或 50 步</td><td>加一个约 20 分钟的诊断运行：AoT 双 core 跑 20 步，复用已有编译目录；排在 CPU 参考（二）之后、口径 B 之前</td><td>只有设备运行才能区分这两个原因。AoT LTX-2 会在主机上加载 50 GB 的 fp32 Gemma，和 CPU 参考同时跑内存不够。</td></tr>
         <tr><td class="num">10-26</td><td>Qwen native 的画质比 AoT 低（16.1 对 21.5 dB）</td><td>如实报告，暂不深查，加了两组"错配噪声"的对照比较</td><td>每边只有一个样本；要查清原因需要多个 seed 或逐步对比，超出这次范围，之后可以作为后续工作。</td></tr>
         <tr><td class="num">10-26</td><td>CPU 参考在哪个 Python 环境跑</td><td>统一用 AoT 的 venv（torch 2.9.1），并屏蔽所有 Neuron 模块</td><td>参考都从设备保存的初始噪声出发，随机数生成器不参与；同一个环境让两个参考只差噪声。屏蔽是因为这个环境里的 diffusers 会自动加载 torch_neuronx。</td></tr>
