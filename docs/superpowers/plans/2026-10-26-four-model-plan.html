@@ -132,7 +132,7 @@ footer { border-top: 1px solid var(--rule); padding-top: 16px; font-size: 0.85re
     <div class="card"><h3><span class="chip done">在仓库里</span>代码、计划、结果</h3><p class="muted">分支 <span class="mono">feat/hunyuan-neuron</span> 已推送：计划文档、HunyuanVideo 计划、结果文档 <span class="mono">benchmark/trn2/four_model_native_vs_aot_2026-10-26.md</span>、这个页面的源文件。AoT 代码用 <span class="mono">origin/main</span> 的 <span class="mono">540e5f0</span>，配环境变量 <span class="mono">DIFFLET_BACKEND=trainium</span>。</p></div>
     <div class="card"><h3><span class="chip wait">只在本机</span>测试数据和脚本</h3><p class="muted"><span class="mono">/home/ubuntu/bench-2026-10-26-4m/</span>（不含编译目录约 2.6 GB：脚本、设备输出、初始噪声、CPU 参考、指标），以及复用的 native 数字来自的 <span class="mono">bench-2026-10-25</span>、<span class="mono">bench-2026-10-26</span>。脚本里写的是绝对路径，要恢复到同样的位置。<span class="mono">handoff/</span> 里有两个 venv 的 pip freeze、Neuron 包版本和模型快照列表。</p></div>
     <div class="card"><h3><span class="chip wait">只在本机</span>编译结果和模型缓存</h3><p class="muted">编译目录 238 GB、<span class="mono">~/.cache/difflet</span> 248 GB、HF 模型缓存约 384 GB。没有 EBS 快照的话，新机器要重新下载模型、重新编译：native 每个模型 3–10 分钟，AoT 每个模型 17 分钟到 1.6 小时。</p></div>
-    <div class="card"><h3><span class="chip redo">需要你决定</span>怎么保留数据</h3><p class="muted">本机没有 AWS 凭证；上传到仓库的 draft release 被权限拦下了。三个办法：① 终止前给这台机器的 EBS 卷做快照，新机器从快照起，所有东西都在，最省事；② 允许我把打包好的数据上传到仓库的 draft release（不公开，也不会让 clone 变大）；③ 你自己把 <span class="mono">/home/ubuntu/handoff-out/</span> 里的包拷走。</p></div>
+    <div class="card"><h3><span class="chip done">已决定</span>用 EBS 快照保留</h3><p class="muted">在约 10:35 UTC 之后（HV native 参考和画质推送之后）、终止之前，给这台机器的根卷做快照，新机器从快照起：venv、模型、编译目录、测试数据都在，不用重新下载和编译。快照里的路径不变（<span class="mono">/home/ubuntu/...</span>）。新机器起来后先确认 Neuron 驱动和 <span class="mono">/dev/neuron*</span> 正常。</p></div>
   </div>
   <div class="card scroll">
     <table>
@@ -150,7 +150,7 @@ footer { border-top: 1px solid var(--rule); padding-top: 16px; font-size: 0.85re
   <div class="card">
     <h3 style="margin-bottom:6px">新机器上按这个顺序做</h3>
     <ol style="margin:0;padding-left:1.3em;display:grid;gap:4px">
-      <li>恢复环境和数据（快照，或者两个 venv、模型、bench 目录），检查 <span class="mono">fuser /dev/neuron*</span> 设备空闲。</li>
+      <li>从 EBS 快照起新机器（同样是 trn2.3xlarge），检查 Neuron 驱动、<span class="mono">fuser /dev/neuron*</span> 设备空闲、<span class="mono">git -C ~/Difflet fetch</span> 拿到最新分支。</li>
       <li>HunyuanVideo CPU 参考：AoT 噪声那一份，如果 native 噪声那一份在本机没跑完也一起重跑（各约 4 h，用 <span class="mono">scripts/job_cpu_ref_queue_wan_hv.sh</span>，已有 rc 的会自动跳过）。</li>
       <li>算 HunyuanVideo 两个后端的画质，补完结果文档的画质（二）和总结论。</li>
       <li>LTX-2 AoT 诊断：双 core、20 步，和已有的 20 步 CPU 参考 <span class="mono">ltx_2/cpu_ref/xcheck_aot_noise_20</span> 比。</li>
@@ -395,7 +395,7 @@ footer { border-top: 1px solid var(--rule); padding-top: 16px; font-size: 0.85re
     <table>
       <thead><tr><th>时间</th><th>问题</th><th>采用的做法</th><th>原因</th></tr></thead>
       <tbody id="log-body">
-        <tr><td class="num">10-27 05:20</td><td>保存测试数据：本机没有 AWS 凭证；上传到仓库 draft release 被权限检查拦下</td><td>在本机打好包（<span class="mono">/home/ubuntu/handoff-out/</span>），请你选：EBS 快照（推荐）、允许上传 draft release，或者自己拷走</td><td>仓库是公开的，上传数据算对外发布，要你同意。快照能把编译目录和模型缓存一起保留，新机器省掉几个小时的下载和编译。</td></tr>
+        <tr><td class="num">10-27 05:20</td><td>保存测试数据：本机没有 AWS 凭证；上传到仓库 draft release 被权限检查拦下</td><td>你选了 EBS 快照：在约 10:35 UTC 之后（最终结果推送之后）、终止之前，给根卷做快照，新机器从快照起。本机的打包（<span class="mono">/home/ubuntu/handoff-out/</span>）也会保留在快照里，作为备份</td><td>仓库是公开的，上传数据算对外发布，要你同意。快照能把编译目录和模型缓存一起保留，新机器省掉几个小时的下载和编译。</td></tr>
         <tr><td class="num">10-27 05:20</td><td>新机器上测口径 B</td><td>在新机器上把口径 A 也重测一次，再和 B 比</td><td>冷启动受磁盘和机器影响，A 和 B 要在同一台机器上测才能比。</td></tr>
         <tr><td class="num">10-27 05:15</td><td>本机约 11:00 终止，剩下的两份 HunyuanVideo 参考（各约 4 h）跑不完</td><td>停掉原来的工作流（Wan 参考不受影响），挂一个串接任务：Wan 一结束就跑 HunyuanVideo native 噪声参考，预计 09:45 完成；AoT 噪声那份移到新机器。新工作流在 10:30 前算完 Wan 和 HV native 的画质并提交</td><td>能在终止前跑完的只有一份；先跑 native 这份，是因为 HunyuanVideo native 是这次的主角。设备上的诊断和口径 B 本来就要等参考跑完（内存不够），也放到新机器上。</td></tr>
         <tr><td class="num">10-27</td><td>要不要补 CPU bf16 对 CPU fp32 的基准</td><td>你决定：加进计划，等新机器再跑，这次不执行</td><td>CPU 时间约 24 小时，现在这台机器的 CPU 和内存正被 fp32 参考占满。</td></tr>
@@ -436,7 +436,7 @@ footer { border-top: 1px solid var(--rule); padding-top: 16px; font-size: 0.85re
     <table>
       <thead><tr><th>事项</th><th>状态</th><th>说明</th></tr></thead>
       <tbody>
-        <tr><td>本机约 10-27 11:00 终止</td><td><span class="chip redo">需要你决定</span></td><td>测试数据只在本机，需要选一种办法保留（见“交接”一节）。没保留的话，新机器要重跑设备测量才能补 HunyuanVideo 的画质。</td></tr>
+        <tr><td>本机约 10-27 11:00 终止</td><td><span class="chip wait">等快照</span></td><td>你选了 EBS 快照。要在 10:35 之后、终止之前做；太早做的话，之后跑出来的 HV native 参考不在快照里（结果文档已推送，但原始数据会缺）。</td></tr>
         <tr><td>新机器的软件版本</td><td><span class="chip wait">风险</span></td><td>Neuron SDK 或 venv 版本不同的话，设备计时不能和这里的数字混用，两个后端要在新机器上一起重测。</td></tr>
         <tr><td>第 3 批包括 umT5</td><td><span class="chip done">已确认</span></td><td>umT5 写死成 fp32，要先过 F13 的精度检查（约 2.5 h），不通过就保留 fp32。第 3 批放在报告之后。</td></tr>
         <tr><td>磁盘</td><td><span class="chip wait">风险</span></td><td>新的编译目录预计 216–246 GB，清理旧目录后才够；剩余空间低于 80 GB 时会停下来报告。</td></tr>
