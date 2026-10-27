@@ -914,6 +914,89 @@ Files: `B/quality_part1/{qwen,ltx2}_{native,aot}_vs_ref.json`. Mismatched-noise 
 - **LTX-2:** native 18.1 dB / 0.811 with video cosine 0.930 follows its reference closely. AoT 16.2 dB / 0.660 with video cosine 0.725 does not, and its frames show artefacts that its reference does not. Audio latents stay close on both (cosine 0.989 and 0.980).
 - PSNR on these generative outputs is low in absolute terms: a small shift of a fox's legs or of background trees costs several dB. SSIM and latent cosine track what the frames show better here than PSNR.
 
+## Phase 4 part 2 preparation: CPU reference tooling for Wan2.1 and HunyuanVideo
+
+Tooling only, 2026-10-26 23:50 to 2026-10-27 00:50 UTC. No 50-step reference has run yet. Everything ran on the CPU, and the Neuron device stayed idle: `neuron_users` was empty at every start, and no process loaded a Neuron module or opened a `/dev/neuron*` fd.
+
+**Scripts** (in `B/scripts`, outside the repo; same pattern as part 1)
+- `cpu_ref_wan.py` (sha256 `02b0b9e3…`) uses diffusers' own `WanPipeline`. The call follows `origin/feat/torch-native-backend:tests/manual/wan_e2e_reference.py`, changed to Wan2.1 and this workload: 480x832x9, guidance 5.0, the campaign prompt.
+- `cpu_ref_hv.py` (`a4c90338…`) uses diffusers' own `HunyuanVideoPipeline`. The prompt is encoded by the pipeline's own `encode_prompt` with Llama-3 8B and CLIP-L in fp32. Both text encoders are then freed before the fp32 DiT loads.
+- `cpu_ref_common.py` (`f88cce3f…`, unchanged from part 1) and `cpu_only.py` are shared.
+- `job_cpu_ref.sh` gained the `wan2_1` and `hunyuan_video` entries. The part-1 version is kept as `job_cpu_ref.as-used-part1-2026-10-26.sh`.
+- `schedule_check_wan.py` and `schedule_check_hv.py` check the schedule. `hv_text_cmp.py` compares text tensors. `smoke_part2.sh` runs the smokes, and `ref_brief.py` summarises a run.
+- Prepared but not started: `job_cpu_ref_queue_wan_hv.sh`, the three 50-step references one after the other (Wan2.1, then HunyuanVideo with native noise, then HunyuanVideo with AoT noise).
+- **Environment:** the same as part 1. Venv `/home/ubuntu/venvs/difflet-neuron` with torch 2.9.1, diffusers 0.38.0 and transformers 4.57.6. torch uses 6 intra-op and 6 inter-op threads.
+
+**Wan2.1: the negative prompt both device runs used is the empty string**
+- Neither q1 command passed `--negative-prompt`. Main's CLI has no such flag, and the branch's flag applies only to Qwen-Image.
+- Both backends' transformer stages call `app(prompt=…, guidance_scale=5.0, …)` with no negative prompt:
+  - native: branch `difflet/cli/orchestrators/wan.py`, the transformer stage and `_stage_transformer_neuron`;
+  - AoT: main `difflet/cli/orchestrators/wan.py:256-268`.
+- That call reaches the same `WanOrchestrator` (`difflet/models/wan/pipeline.py`). The branch's file and main's differ only in a CUDA-only timestep-dtype hook.
+- With `negative_prompt=None`, `_negative_prompt_embeds` encodes `""`. The empty string becomes one valid token (EOS), and the rest of the 512 positions are zero-padded.
+- With guidance > 1, the pipeline runs two DiT forwards per step and combines them as `uncond + 5.0·(cond − uncond)`.
+- So **native and AoT used the same negative prompt, `""`**, and nothing needs recording as a difference. It is also diffusers' default (`negative_prompt or ""`). The model card's long negative prompt was not used by either backend.
+- The reference passes `negative_prompt=""` to diffusers' `encode_prompt` (`max_sequence_length` 512). `prompt_clean` leaves both strings unchanged. Encoding gives 16 valid tokens for the prompt and 1 for the negative.
+- The script counts 2 DiT calls per step and checks the order: the first call's `encoder_hidden_states` is the prompt, the second's is the negative (`cfg.first_calls_text` = cond, uncond, cond, uncond).
+
+**HunyuanVideo: the embedded guidance**
+- **Device side:** both backends build the guidance input as `torch.full([1], 6.0 × 1000, dtype=bfloat16)`:
+  - native: `_bundle_from_tensors` in `difflet/models/hunyuan_video/pipeline.py`, with the application dtype bf16, which is the `…__bfloat16__tp4__…` weight-store key in the run log;
+  - AoT: main `difflet/cli/orchestrators/hunyuan_video.py:320-324`.
+  - Each runs one DiT forward per step with no CFG.
+- **diffusers:** builds `guidance = tensor([guidance_scale]) · 1000` in the transformer dtype. It runs true CFG only when `true_cfg_scale > 1` and a negative prompt is given.
+- **The reference** passes `guidance_scale=6.0`, `true_cfg_scale=1.0` and no negative prompt. The DiT receives **6000.0** (recorded from its first call), with one call per step (counted).
+- **Known difference:** in bf16, 6000 rounds to **6016.0**, so both device DiTs received 6016. The fp32 reference keeps diffusers' 6000.0, the nominal 6.0 × 1000 (`--guidance-scale 6.016` would mirror the bf16 value).
+  - The device timesteps are bf16 as well (`_batch_timestep(…, model dtype)`), for example 875 becomes 876.
+  - The Wan device DiT gets bf16 timesteps too (999 becomes 1000, 750 becomes 752), while diffusers passes the exact int64 timestep (`schedule_check_*.json`).
+  - Part 1 did not mirror bf16 rounding of the device DiT inputs either.
+- **Text conditioning, checked against the AoT device** (`hv_text_cmp.py`, AoT q1 `work/llama.pt` / `clip.pt` against the reference's `text_embeds.pt`; file `B/hunyuan_video/cpu_ref/smoke_aot_cut2/text_vs_aot_device.json`):
+  - the masks are identical: 13 valid tokens, a prefix of the 256;
+  - Llama cosine on the valid rows is 0.99997 (worst row 0.99995);
+  - the CLIP pooled cosine is 0.99995.
+  - The native device calls the same `encode_prompt`, in bf16 on rank 0's host.
+
+**Injection is bit-exact.** In every smoke, the transformer's first `hidden_states` equals the fp32 upcast of the device dump bit for bit, and it rounds back to the dump's bits.
+
+| dump (device q1) | dtype, shape | file / raw sha256 | smokes |
+|---|---|---|---|
+| Wan2.1 `aot_main_tp4_twocore/q1/initial.pt` (equal to the native dump) | fp32 (1,16,3,60,104) | `03b6284b…` / `16aeaed7…` | `smoke_cut2`, `smoke_full2` |
+| HunyuanVideo native `native_tp4_hashcheck/q1/initial.pt` | fp32 (1,16,16,40,64) | `d4a20de5…` / `419eace4…` | `smoke_native_full2` |
+| HunyuanVideo AoT `aot_main_tp4/q1/initial.pt` | bf16 (1,16,16,40,64) | `e13a3f46…` / `f70d76ae…` | `smoke_aot_cut2` |
+
+**Schedules** (`schedule_check_wan.py`, `schedule_check_hv.py`; max |Δt| 0 and max |Δσ| 0 in every smoke)
+- **Wan2.1:** the check loads both device copies of `difflet/models/wan/pipeline.py` (the branch's and `aot-main`'s) as standalone modules. It runs their own `_load_scheduler` and `set_timesteps(N)`: `UniPCMultistepScheduler` from the snapshot, `flow_shift` 3.0. The two copies agree with each other and with the reference.
+- **HunyuanVideo:** the check rebuilds both device paths' formula, `FlowMatchEulerDiscreteScheduler` from the snapshot (shift 7.0) with `sigmas = linspace(1, 0, N+1)[:-1]`. It is identical to the reference, and the reference's DiT guidance equals 6.0 × 1000.
+
+**Outputs** (in `B/<model>/cpu_ref/<name>/`)
+- `final.pt` is the fp32 loop output, at the same point as the device `final.pt`.
+- `out_raw.pt` is the raw fp32 VAE decode (1,3,F,H,W) in about [−1,1], captured inside diffusers' call. It has the layout of the device `out.pt` and of Wan's A2 `host_fp32_frames.pt`.
+- `out.pt` is diffusers' `postprocess_video("pt")`: (1,F,3,H,W) in [0,1]. Each run checks that it equals `(out_raw/2 + 0.5).clamp(0,1)` bit for bit.
+- Also written: `mid.png`, `strip.png`, `reference.json`, and for HunyuanVideo `text_embeds.pt`.
+- Each run also checks that the VAE input equals the de-normalised final latents: Wan's `latents_mean` / `latents_std`, HunyuanVideo's `/ scaling_factor`.
+- HunyuanVideo decodes with diffusers' tiled VAE in fp32: 256x256 spatial tiles, 16-frame temporal tiles, frame-wise decoding.
+
+**Smoke runs** (real shapes, 2 steps; `--cut-layers 2` builds a 2-block DiT, or 2 dual + 2 single blocks for HunyuanVideo)
+
+| run | DiT | text load + encode | DiT load | step (steady) | decode | peak VmRSS / RssAnon | lowest MemAvailable | wall |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| Wan `smoke_cut2` | 2 blocks | 0.9 + 147.1 s (cold umT5 read) | 0.8 s (lazy mmap) | 15.4 s | 56.5 s | 18.7 / 8.9 GiB | 120.3 GiB | 264 s |
+| Wan `smoke_full2` | 40 blocks, 14.29 B, fp32 | 0.5 + 14.7 s | 0.1 s; read during step 1 (first forward 414.0 s) | **295.4 s** (forwards 147.9 + 147.4) | 52.4 s | 62.7 / 8.8 GiB | 113.0 GiB | 930 s |
+| HV `smoke_aot_cut2` | 2+2 blocks | 115.5 + 5.7 s (cold Llama read) | 20.3 s | 18.0 s | 414.7 s | 33.2 / 29.4 GiB | 92.6 GiB | 597 s |
+| HV `smoke_native_full2` | 20+40 blocks, 12.82 B, fp32 | 2.9 + 5.7 s | 173.9 s | **269.8 s** (265.8 for step 1) | 433.1 s | 56.0 / 55.1 GiB | 66.8 GiB | 1158 s |
+
+- **Wan2.1:** the fp32 checkpoint is mmapped, so the DiT stays file-backed (RssFile 53.8 GiB) and anonymous memory peaks at 8.8 GiB. The HunyuanVideo DiT checkpoint is bf16, so the fp32 upcast is anonymous memory (49 GiB).
+- Peak memory stays well under the 112 GiB start guard of `job_cpu_ref.sh`. Two references never run together.
+- The steady Wan forward, 148 s for 14.3 B parameters at 4680 tokens, is slower per parameter than part 1's Qwen-Image, which took 80 s per step for 20.4 B parameters at 4096 tokens. *Not investigated.* The thread settings were kept identical to part 1.
+- **Content after 2 steps:** the Wan strip already shows a blurred fox running across snow in front of a forest. The HunyuanVideo strip is still mostly noise, a dark blob on a blue gradient, as expected at σ 0.875.
+
+**Estimated 50-step wall time**
+- **Wan2.1:** about 4.2 h. That is about 2.5 min cold encode, then 50 × 295 s, plus about 4.5 min of cold DiT read during step 1, plus a 52 s decode. The plan's inferred estimate was 2–2.5 h.
+- **HunyuanVideo:** about 3.9–4.0 h each. That is about 2 min cold encode and 3–5 min DiT load, then 50 × 268 s, plus a 7 min tiled decode.
+- **All three in sequence:** about 12 h.
+
+**For the metrics stage:** the Wan and HunyuanVideo device `out.pt` files (and Wan's `host_fp32_frames.pt`) are raw decodes, (1,3,F,H,W) in about [−1,1]. `quality_metrics.py` reads (1,F,3,H,W) in [0,1]. So each frames input, device and reference alike, goes through the same map before the uint8 rule: diffusers' `(x/2 + 0.5).clamp(0,1)`, permuted to (1,F,3,H,W). The reference's `out.pt` is exactly that map of its `out_raw.pt`.
+
 ## Next
 
 - **Phase 4 (CPU):** the 7 references, 50 steps each, in fp32, Qwen-Image and LTX-2 first. Inputs:
@@ -930,6 +1013,7 @@ Files: `B/quality_part1/{qwen,ltx2}_{native,aot}_vs_ref.json`. Mismatched-noise 
     - native noise: fp32, `B/hunyuan_video/native_tp4_hashcheck/q1/initial.pt`;
     - AoT noise: bf16, `B/hunyuan_video/aot_main_tp4/q1/initial.pt`.
     - Caveat: the AoT VAE tiling caps frame PSNR at about 42.5 dB (`hunyuan_video_neuron.md`).
+  - HunyuanVideo and Wan2.1 tooling: **ready** (section "Phase 4 part 2 preparation"). The three references are queued in `B/scripts/job_cpu_ref_queue_wan_hv.sh`, about 12 h; not started.
   - **Wan2.1:** one reference serves both backends: noise `03b6284b…` (raw `16aeaed7…`).
     - Native frames: `B/wan2_1/native_tp4_hashcheck/q1/out.pt`.
     - AoT frames: use the fp32 host decode `B/wan2_1/aot_main_tp4_twocore/q1_host_vae/host_fp32_frames.pt`, which is the A2 placement, because the device-VAE frames are corrupted.
