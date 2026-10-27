@@ -192,8 +192,10 @@ def _add_cache_flags(p: argparse.ArgumentParser) -> None:
         dest="vae_dtype",
         choices=["bf16", "fp32"],
         default=None,
-        help="HunyuanVideo on --backend neuron: the device VAE decoder's precision, in the vae "
-        "launch or in process (default: bf16). Not with --host-vae.",
+        help="--backend neuron: the device VAE decoder's precision. HunyuanVideo: in the vae "
+        "launch or in process (default: bf16). Wan and Qwen-Image: in the vae stage (default: "
+        "fp32; bf16 is opt-in, with the norms, the attention scores and the output head kept "
+        "in fp32). Not with --host-vae.",
     )
     p.add_argument(
         "--vae-exec-mode",
@@ -213,6 +215,16 @@ def _add_cache_flags(p: argparse.ArgumentParser) -> None:
         "default). Set automatically when the "
         "TP group is too narrow for umT5 to fit beside the DiT (tp2, e.g. --cfg-parallel or "
         "--cp-degree 2 on four cores, or --dp 2 --tp-degree 2)",
+    )
+    p.add_argument(
+        "--text-encoder-dtype",
+        dest="text_encoder_dtype",
+        choices=["bf16", "fp32"],
+        default=None,
+        help="Wan on --backend neuron: umT5's precision, on the device or with "
+        "--host-text-encoder on the host (default: fp32). bf16 halves what umT5 reads at every "
+        "cold start (the neuron weight store keeps a bf16 copy); it is opt-in until its "
+        "accuracy against fp32 is validated (F13).",
     )
     p.add_argument(
         "--device-text-encoder",

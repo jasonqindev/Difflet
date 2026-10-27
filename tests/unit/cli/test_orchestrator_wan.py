@@ -822,11 +822,11 @@ class _FakeNeuronVae:
 
     instances: list = []
 
-    def __init__(self, *, model_path, latent_shape, parallel, device):
+    def __init__(self, *, model_path, latent_shape, parallel, dtype, device):
         from difflet.models.wan.vae.modeling_vae import WanVAEDecoderConfig
 
         self.model_path, self.latent_shape, self.device = model_path, latent_shape, device
-        self.dtype = __import__("torch").float32
+        self.dtype = dtype
         self.vae_config = WanVAEDecoderConfig(z_dim=4, latents_mean=[0.5] * 4,
                                               latents_std=[2.0] * 4)
         self.loaded, self.skip_warmup, self.decoded = False, None, []
@@ -840,8 +840,9 @@ class _FakeNeuronVae:
         return z.cpu() + 1.0
 
 
+@pytest.mark.parametrize("vae_dtype", [None, "fp32", "bf16"])
 @pytest.mark.parametrize("mode", ["compile", "generate"])
-def test_neuron_vae_stage_decodes_on_the_device(monkeypatch, tmp_path, mode):
+def test_neuron_vae_stage_decodes_on_the_device(monkeypatch, tmp_path, mode, vae_dtype):
     import json
 
     import torch
@@ -875,12 +876,15 @@ def test_neuron_vae_stage_decodes_on_the_device(monkeypatch, tmp_path, mode):
     z = torch.randn(1, 4, 3, 60, 104)
     torch.save(z, work / "latents.pt")
     args = _wan_args(model_id=_WAN21_ID, stage_mode=mode, work_dir=str(work),
-                     cache_dir=str(tmp_path / "cache"), output=str(tmp_path / "out" / "clip.pt"))
+                     cache_dir=str(tmp_path / "cache"), output=str(tmp_path / "out" / "clip.pt"),
+                     vae_dtype=vae_dtype)
 
     WanOrchestrator(args)._stage_vae(args)
 
     [app] = _FakeNeuronVae.instances
     assert app.loaded and app.latent_shape == (1, 4, 3, 60, 104) and app.device == "neuron"
+    # fp32 unless --vae-dtype bf16 (the phase-3 opt-in).
+    assert app.dtype is (torch.bfloat16 if vae_dtype == "bf16" else torch.float32)
     # Its NEFF cache is DIFFLET_COMPILE_CACHE's, not torch-neuronx's /tmp/neff_cache.
     assert os.environ["TORCH_NEURONX_NEFF_CACHE_DIR"] == str(
         tmp_path / "compile_cache" / "neuron" / "neff")
@@ -1517,3 +1521,106 @@ def test_dp_workers_inherit_the_host_encoder_from_run(wan_snapshot, tmp_path):
     args = _wan_args(model_id=_WAN21_ID, work_dir=str(tmp_path / "work"), tp_degree=2)
     WanOrchestrator(args).compile()
     assert "--host-text-encoder" in worker_cli_args(args)
+
+
+# ------------------------- phase-3 precision opt-ins: --text-encoder-dtype and --vae-dtype
+
+
+@pytest.mark.parametrize(("flag", "app_dtype"), [("bf16", "bfloat16"), ("fp32", "float32")])
+def test_text_encoder_dtype_reaches_the_neuron_application(neuron_stage, tmp_path, flag,
+                                                           app_dtype):
+    # Without the flag the kwargs are _NEURON_APP_KWARGS exactly (the tests above): the
+    # application's own default, fp32, applies.
+    args = _wan_args(stage_mode="generate", work_dir=str(tmp_path), text_encoder_dtype=flag)
+    WanOrchestrator(args)._stage_transformer(args)
+
+    [call] = neuron_stage.CALLS
+    assert call["kwargs"]["application_kwargs"] == {**_NEURON_APP_KWARGS,
+                                                    "text_encoder_dtype": app_dtype}
+
+
+def test_precision_flags_are_forwarded_only_when_given_and_parsed():
+    from difflet.cli.main import _build_parser
+    from difflet.cli.stage import _build_stage_parser
+
+    plain = WanOrchestrator(_wan_args())._shared_cli_args(stage_mode="generate")
+    assert "--text-encoder-dtype" not in plain and "--vae-dtype" not in plain
+    flagged = _wan_args(text_encoder_dtype="bf16", vae_dtype="bf16")
+    parts = WanOrchestrator(flagged)._shared_cli_args(stage_mode="compile")
+    assert parts[parts.index("--text-encoder-dtype") + 1] == "bf16"
+    assert parts[parts.index("--vae-dtype") + 1] == "bf16"
+    for command in ("compile", "generate", "run"):
+        cli = _build_parser().parse_args([command, "--model-id", _WAN21_ID,
+                                          "--text-encoder-dtype", "bf16", "--vae-dtype", "bf16"])
+        assert (cli.text_encoder_dtype, cli.vae_dtype) == ("bf16", "bf16")
+        default = _build_parser().parse_args([command, "--model-id", _WAN21_ID])
+        assert (default.text_encoder_dtype, default.vae_dtype) == (None, None)
+    stage, _ = _build_stage_parser().parse_known_args(
+        ["--orchestrator", _WAN21_ID, "--stage", "transformer", *parts])
+    assert (stage.text_encoder_dtype, stage.vae_dtype) == ("bf16", "bf16")
+
+
+def test_precision_flags_reach_dp_workers():
+    from difflet.cli.dp.router import worker_cli_args
+
+    argv = worker_cli_args(_wan_args(model_id=_WAN21_ID, text_encoder_dtype="bf16",
+                                     vae_dtype="bf16"))
+    assert argv[argv.index("--text-encoder-dtype") + 1] == "bf16"
+    assert argv[argv.index("--vae-dtype") + 1] == "bf16"
+    plain = worker_cli_args(_wan_args(model_id=_WAN21_ID))
+    assert "--text-encoder-dtype" not in plain and "--vae-dtype" not in plain
+
+
+def test_bf16_components_get_their_own_neuron_stage_keys(monkeypatch):
+    """bf16 adds one field to the stage that runs the component (umT5: transformer; the decoder:
+    vae); fp32, given or not, keeps the key, and the AoT backends' keys never change."""
+    def keyed(backend, **flags):
+        _unset(monkeypatch, "DIFFLET_BACKEND", "DIFFLET_EXEC_MODE")
+        if backend is not None:
+            monkeypatch.setenv("DIFFLET_BACKEND", backend)
+        args = _wan_args(model_id=_WAN21_ID, cache_dir="/c", **flags)
+        orch = WanOrchestrator(args)
+        return {s: (orch._stage_cache_inputs(s, args), orch._stage_compiled_dir(s, args))
+                for s in ("transformer", "vae")}
+
+    for backend in (None, "trainium", "tpu"):
+        assert keyed(backend, text_encoder_dtype="bf16", vae_dtype="bf16") == keyed(backend)
+    neuron = keyed("neuron")
+    assert keyed("neuron", text_encoder_dtype="fp32", vae_dtype="fp32") == neuron
+    umt5 = keyed("neuron", text_encoder_dtype="bf16")
+    assert umt5["transformer"][0] == {**neuron["transformer"][0],
+                                      "text_encoder_dtype": "bfloat16"}
+    assert umt5["transformer"][1] != neuron["transformer"][1] and umt5["vae"] == neuron["vae"]
+    vae = keyed("neuron", vae_dtype="bf16")
+    assert vae["vae"][0] == {**neuron["vae"][0], "vae_dtype": "bfloat16"}
+    assert vae["vae"][1] != neuron["vae"][1] and vae["transformer"] == neuron["transformer"]
+
+
+@pytest.mark.parametrize("mode", ["compile", "generate", "run"])
+def test_vae_dtype_is_refused_with_host_vae_on_neuron(monkeypatch, tmp_path, capsys, mode):
+    monkeypatch.setenv("DIFFLET_BACKEND", "neuron")
+    _refuse_launches(monkeypatch)
+    args = _wan_args(work_dir=str(tmp_path / "work"), host_vae=True, vae_dtype="bf16")
+
+    with pytest.raises(SystemExit) as exc:
+        getattr(WanOrchestrator(args), mode)()
+
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert "--vae-dtype sets the device decoder; --host-vae decodes on the host" in err
+
+
+def test_bf16_umt5_stays_on_the_device_where_fp32_would_not_fit(wan_snapshot, tmp_path, capsys):
+    # tp2: fp32 umT5 is 10.6 GiB beside 13.3 GiB of DiT (over the 22.8 GiB budget: moved to the
+    # host, test_a_narrow_tp_moves_umt5_to_the_host_before_any_launch); bf16 is 5.3 GiB and fits.
+    wan_snapshot.root = _header_only_checkpoint(tmp_path / "snapshot")
+    args = _wan_args(model_id=_WAN21_ID, work_dir=str(tmp_path / "work"), tp_degree=2,
+                     text_encoder_dtype="bf16")
+
+    WanOrchestrator(args).generate()
+
+    assert _NOTE not in capsys.readouterr().out
+    assert not getattr(args, "host_text_encoder", False)
+    assert [("--host-text-encoder" in cli) for _, cli in wan_snapshot.stages] == [False, False]
+    assert all(cli[cli.index("--text-encoder-dtype") + 1] == "bf16"
+               for _, cli in wan_snapshot.stages)
