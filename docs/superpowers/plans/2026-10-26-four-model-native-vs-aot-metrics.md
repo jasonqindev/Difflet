@@ -239,6 +239,105 @@ Only Wan2.1 (DiT: store 217 s vs fp32 checkpoint 435 s) and LTX-2 (Gemma-3: stor
 - Final order: phase 1 (AoT Qwen-Image, LTX-2; running) with F12 in parallel, then phase 2 device (Qwen native hash/quality, LTX-2 native A, HunyuanVideo AoT, Wan2.1 AoT, HunyuanVideo/Wan native hash/quality), then CPU references (7 x 50 steps), then PSNR/SSIM and the report, then B (native cold without the store, Wan2.1 and LTX-2; before phase 3 so it uses the same dtypes as A), then phase 3 (VAE and umT5 bf16, native re-tests of Qwen-Image and Wan2.1, reported as a supplement). Phase-3 code may be prepared during phase 2 (not wired into the default path).
 - Standing instruction: proceed without asking; on a problem, apply the default recommendation and log the decision on the plan page (https://claude.ai/artifact/N1nuQ2V4rhnJLhtE2e4qVs); add results to the page as each batch finishes.
 
+### Phase 3 device validation runbook (code prepared 2026-10-27; run after the CPU reference ends, about 22:20 UTC)
+
+**Code (feat/hunyuan-neuron, opt-in only; every default stays fp32 and every default command line, stage key and manifest is unchanged):**
+- `e809595` `WanVAEDecoderModel(fp32_output_head=True)`: for bf16 input, `conv_out` and the clamp run in fp32 and the frames come back fp32. The neuron device's written-out VAE attention computes its scores and softmax in fp32 for bf16 input. The RMS norms already normalise in fp32. This is the HunyuanVideo F2 precedent (`2e04372`, statistics in fp32) applied to Wan's norms. The Trainium model is unchanged.
+- `c706e39` application switches: `TorchNeuronWanApplication(vae_dtype=, text_encoder_dtype=)` and `TorchNeuronQwenImageApplication(vae_dtype=)`, all fp32 by default. The VAE adapters un-normalise in fp32 and round only the decoder input. The weight store keys on the load dtype: bf16 umT5 writes an 11.36 GB entry (2.84 GB per rank) and fp32 umT5 writes none.
+- `1832960` CLI switches, `--backend neuron` only:
+  - `--vae-dtype bf16|fp32`: Wan2.1 and Qwen-Image vae stage, default fp32. Refused with `--host-vae`.
+  - `--text-encoder-dtype bf16|fp32`: Wan umT5, device or `--host-text-encoder`, default fp32.
+  - A bf16 component adds one field to its neuron stage key: `vae_dtype` on the vae stage, `text_encoder_dtype` on the transformer stage.
+  - Both flags reach the stage processes and the DP workers.
+- Check scripts (bench dir, not in the repo): `/home/ubuntu/bench-2026-10-26-4m/scripts/f13_umt5_bf16_check.py` and `.../vae_bf16_check.py`. Both were dry-run on the CPU on the unit tests' tiny random Wan (`--tiny --device cpu`). Nothing real was loaded.
+
+**Common setup.** `B=/home/ubuntu/bench-2026-10-26-4m`, `W=/home/ubuntu/Difflet/.claude/worktrees/hunyuan-neuron`, `PY=/home/ubuntu/venvs/native-312/bin`.
+- **Preconditions:**
+  - the CPU reference has exited (`pgrep -f cpu_ref_` is empty and its `rc` file is 0);
+  - `free -g` shows at least 100 GiB available;
+  - `fuser /dev/neuron0` is empty;
+  - at least 80 GB of disk is free.
+- **Device order:** step 1 → 2 → 4 → 5. Steps 3 and 6 run on the CPU. Run the device steps one at a time as `systemd-run --user` units, not under a Monitor (phase-1 lesson).
+- **Phase 6 (B) first:** if B (native cold without the store) has not run yet, run it before step 4. It must use today's fp32 dtypes, so leave both flags off.
+
+**Step 1: F13, umT5 bf16 vs fp32 (device, TP4, about 15 min).**
+- What runs: fp32, then bf16, through the native prompt path. That is the composed application with `text_encoder_device="neuron"` and `WanOrchestrator.encode_prompt`, without the DiT.
+- Prompts: `"a cinematic shot of a red fox running through a snowy forest"` and the empty negative prompt `""`.
+- The weight store is off for this check, so each dtype reads the 22.7 GB fp32 checkpoint.
+```
+mkdir -p $B/phase3/f13 && cd $W
+HF_HUB_OFFLINE=1 PYTHONPATH=$W DIFFLET_COMPILE_CACHE=$B/roots/p3_scratch \
+  $PY/torchrun --standalone --nproc-per-node 4 $B/scripts/f13_umt5_bf16_check.py \
+  --model-id Wan-AI/Wan2.1-T2V-14B-Diffusers --revision 38ec498cb3208fb688890f8cc7e94ede2cbd7f68 \
+  --out $B/phase3/f13 --save-embeds 2>&1 | tee $B/phase3/f13/run.log
+```
+- **Pass:** every prompt has cosine ≥ 0.995 over its valid tokens, and the embeddings are identical on all 4 ranks (exit 0).
+- **Reported:** max abs error, rel-L2, the worst per-token cosine, the same metrics after the bf16 cast the DiT sees, load seconds and per-rank bytes.
+- **If it fails:** keep umT5 in fp32. Leave `--text-encoder-dtype` off in step 5 and record the numbers.
+
+**Step 2: VAE bf16 vs fp32 decode of the same latents (device, one core).**
+- The latents are the phase-2 q1 dumps.
+- The script runs the CLI vae stage's exact path at fp32 and then at bf16. It loads without a warm-up, as generate does, and decodes once at each dtype.
+- The first bf16 decode compiles its eager per-op kernels into `p3_scratch`. That takes minutes: the fp32 Wan vae launch compile took 169.7 s.
+```
+mkdir -p $B/phase3/vae_wan $B/phase3/vae_qwen && cd $W
+HF_HUB_OFFLINE=1 PYTHONPATH=$W DIFFLET_COMPILE_CACHE=$B/roots/p3_scratch NEURON_RT_VISIBLE_CORES=0 \
+  $PY/torchrun --standalone --nproc-per-node 1 $B/scripts/vae_bf16_check.py --model wan \
+  --latents $B/wan2_1/native_tp4_hashcheck/q1/final.pt --repeat --save-frames --out $B/phase3/vae_wan
+HF_HUB_OFFLINE=1 PYTHONPATH=$W DIFFLET_COMPILE_CACHE=$B/roots/p3_scratch NEURON_RT_VISIBLE_CORES=0 \
+  $PY/torchrun --standalone --nproc-per-node 1 $B/scripts/vae_bf16_check.py --model qwen \
+  --latents $B/qwen_image/native_tp4_hashcheck/q1/work/latents.pt --repeat --save-frames --out $B/phase3/vae_qwen
+```
+- **Pass:** bf16 vs fp32 device decode ≥ 50 dB mean PSNR (RGB uint8, per frame, peak 255, the campaign's `quality_metrics.py` rule). This is the bar HunyuanVideo's bf16 decoder met: 56.07 dB.
+- **Also reported:**
+  - the worst frame and SSIM;
+  - both decodes against diffusers' fp32 host decode (the fp32 device decode should be near-identical to it);
+  - decode seconds (first and repeat) and peak HBM.
+- **If a model fails:** keep its VAE in fp32 (no `--vae-dtype` in its re-measure) and record the numbers.
+
+**Step 3: decide the flags.**
+- Wan2.1: `--vae-dtype bf16` if step 2 Wan passed; `--text-encoder-dtype bf16` if step 1 passed.
+- Qwen-Image: `--vae-dtype bf16` if step 2 Qwen passed.
+- If no switch passed for a model, its re-measure is skipped.
+
+**Step 4: Qwen-Image native re-measure** (fresh root; device about 45 min; same harness and definitions as phase 2, decision D5).
+- Cell `native_tp4_p3`: compile (cold compile), cold A, then warm gen0-3 (gen0 discarded; DiT step from gen1-3).
+- Then q1 for the quality check, as the phase-2 hash check ran it.
+```
+cd $B && /usr/bin/python3 scripts/bench4m.py dry --model qwen_image --cell native_tp4_p3 --run gen0 \
+  --mode generate --venv native -- --backend neuron --tp-degree 4 --vae-dtype bf16   # parse check
+/usr/bin/python3 scripts/bench4m.py cell --model qwen_image --cell native_tp4_p3 --venv native \
+  --runs compile,cold,gen0,gen1,gen2,gen3 --preread -- --backend neuron --tp-degree 4 --vae-dtype bf16
+/usr/bin/python3 scripts/bench4m.py run --model qwen_image --cell native_tp4_p3 --run q1 --mode generate \
+  --venv native --env HV1_DUMP_LATENTS_DIR=$B/qwen_image/native_tp4_p3/q1 \
+  -- --backend neuron --tp-degree 4 --vae-dtype bf16
+```
+- Expected: the DiT step is unchanged (359.0 ms) and q1's latents equal the phase-2 hash check's (`4da4c89e`). Only the vae stage changes: the warm vae stage took 19.2 s in fp32.
+
+**Step 5: Wan2.1 native re-measure** (fresh root; device about 50 min).
+```
+cd $B && /usr/bin/python3 scripts/bench4m.py cell --model wan2_1 --cell native_tp4_p3 --venv native \
+  --runs compile,cold,gen0,gen1,gen2,gen3,q1 --preread \
+  -- --backend neuron --tp-degree 4 --vae-dtype bf16 --text-encoder-dtype bf16
+```
+- **Cold A (D5):** the compile writes the root's weight store. That is the DiT's bf16 entry and, with bf16 umT5, an 11.36 GB umT5 entry. The cold run reads both.
+- **Logs to check:**
+  - `[weight store] ... NeuronWanTextEncoderApplication: hit 2.84 GB` on every rank;
+  - the stage keys carry `text_encoder_dtype` and `vae_dtype`.
+- **Projected (F13):** cold umT5 load about 86 s instead of 172.5 s; cold e2e about 456 s instead of 542.7 s.
+- **Unchanged:** the DiT step, 1063.6 ms (the encoder runs only twice per request).
+
+**Step 6: quality (CPU, minutes).**
+- Both q1 runs against the existing CPU fp32 references, with the part-1/part-2 tooling: `quality_metrics.py`, plus `frames_map.py` for Wan's raw decode.
+  - Wan: `--latents final $B/wan2_1/cpu_ref/ref_50/final.pt <q1>/final.pt --ref-frames $B/wan2_1/cpu_ref/ref_50/out.pt --cand-frames <mapped q1 out.pt>`.
+  - Qwen-Image: against `$B/qwen_image/cpu_ref/ref_native_noise_50`.
+- Also compare each run against its fp32 phase-2 q1 directly. For Wan with bf16 umT5 that is the "50-step e2e against today's fp32 device baseline" half of F13.
+- **Decision recorded 2026-10-27 (conservative default; the plan never defined that half's pass rule):** bf16 umT5 passes the e2e if Wan's q1 is no more than 0.5 dB PSNR and 0.01 SSIM below the fp32 native q1, both against the CPU reference (22.66 dB / 0.885). Otherwise umT5 stays fp32, even when step 1 passed.
+
+**Reporting and defaults.**
+- Results go to the plan page and to `benchmark/trn2/four_model_native_vs_aot_2026-10-26.md` as a supplement, beside the fp32 numbers, which stay the headline.
+- Making any of these bf16 paths the default is a separate change. It follows the default-change rule `74fc979` used (accuracy plus runs at TP2, TP4 and TP2xCP2) and needs the user's approval. Phase 7 (a compiled-by-region Wan VAE) builds on the bf16 decoder validated here.
+
 ## Added 2026-10-26 (user): last step, not urgent
 
 - **Phase 7: compiled-by-region VAE for Wan2.1 and Qwen-Image native.** After phase 3, give the Wan VAE decoder (also used by Qwen-Image) the same treatment HunyuanVideo got in F1a (`1c10dfc`): compile the decoder region by region (fixed-size tiles, one set of small graphs) instead of eager per-op execution, in bf16 once phase 3 has validated bf16 for these VAEs. Why: HunyuanVideo's compiled-by-region decoder decodes in 16.0 s vs 74 s eager fp32 and compiles in about 135 s vs 1752 s eager, at the same speed as AoT's whole-graph compile (17.1 s) without AoT's hour-long VAE compile (Wan AoT VAE: 5468 s). Gates: decoded frames >= 50 dB vs the fp32 host decode, CPU tests of the tiling against diffusers, device decode timing; then re-measure Wan2.1 and Qwen-Image native warm/cold e2e as a supplement.
