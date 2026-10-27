@@ -118,10 +118,45 @@ footer { border-top: 1px solid var(--rule); padding-top: 16px; font-size: 0.85re
 
 <section aria-label="当前状态">
   <div class="status">
-    <div class="card"><span class="chip run">运行中</span><p class="big">CPU 参考（二）</p><p class="muted">Wan ×1（10-27 01:23 时在第 5/50 步，每步约 315 s，预计 05:20 完成）→ HunyuanVideo ×2（各约 4 h）→ 画质指标和总报告，预计 10-27 14:00 左右出完整结果。比原先估计慢约 3 h。CPU 参考（一）已完成：Qwen、LTX-2 的画质结果见下方。</p></div>
-    <div class="card"><span class="chip done">已完成</span><p class="big">F12</p><p class="muted">LTX-2 Gemma 加载问题已修复（05614a2），独立复查通过：在真实 snapshot 上 Gemma 的 626 个 key 全部能找到</p></div>
-    <div class="card"><span class="chip reuse">可复用</span><p class="big num">12 / 48</p><p class="muted">格数据可以复用（HunyuanVideo、Qwen、Wan 的 native 计时）</p></div>
-    <div class="card"><span class="chip todo">预计</span><p class="big num">≈ 28 h</p><p class="muted">主计划的总时间（设备约 13 h，CPU 参考约 14 h），约 22 h 出画质结果和报告；另有最后一步 VAE 分区域编译约 3 h，不急</p></div>
+    <div class="card"><span class="chip wait">换机器</span><p class="big">10-27 约 11:00 终止</p><p class="muted">这台机器约 11:00 UTC 终止。接手步骤见下方“交接”一节和仓库里的 <span class="mono">docs/superpowers/plans/2026-10-27-handoff.md</span>。</p></div>
+    <div class="card"><span class="chip run">运行中（本机）</span><p class="big">CPU 参考（二）</p><p class="muted">Wan ×1 在 10-27 05:15 跑到第 47/50 步，约 05:35 完成，然后马上算 Wan 的画质。接着跑 HunyuanVideo native 噪声这一份（约 4 h，预计 09:45 完成），再算它的画质。</p></div>
+    <div class="card"><span class="chip todo">移到新机器</span><p class="big">HV AoT 参考及之后</p><p class="muted">HunyuanVideo AoT 噪声参考（约 4 h）在本机跑不完，移到新机器。之后依次是：LTX-2 AoT 诊断、口径 B、第 3 批、最后一步，以及 CPU bf16 基准。</p></div>
+    <div class="card"><span class="chip done">已完成</span><p class="big num">8 / 8</p><p class="muted">设备测量的 8 格全部完成；CPU 参考 5 / 7 份完成（Qwen ×2、LTX-2 ×2、Wan ×1）；画质已出 Qwen、LTX-2，Wan 马上出</p></div>
+  </div>
+</section>
+
+<section aria-labelledby="h-handoff" id="handoff">
+  <h2 id="h-handoff">交接：在新机器上接着做</h2>
+  <p class="col muted">这台 trn2.3xlarge 约在 10-27 11:00 UTC 终止。下面是新机器接手需要的全部信息。仓库里有同样内容的 <span class="mono">docs/superpowers/plans/2026-10-27-handoff.md</span>（分支 <span class="mono">feat/hunyuan-neuron</span>）。</p>
+  <div class="why">
+    <div class="card"><h3><span class="chip done">在仓库里</span>代码、计划、结果</h3><p class="muted">分支 <span class="mono">feat/hunyuan-neuron</span> 已推送：计划文档、HunyuanVideo 计划、结果文档 <span class="mono">benchmark/trn2/four_model_native_vs_aot_2026-10-26.md</span>、这个页面的源文件。AoT 代码用 <span class="mono">origin/main</span> 的 <span class="mono">540e5f0</span>，配环境变量 <span class="mono">DIFFLET_BACKEND=trainium</span>。</p></div>
+    <div class="card"><h3><span class="chip wait">只在本机</span>测试数据和脚本</h3><p class="muted"><span class="mono">/home/ubuntu/bench-2026-10-26-4m/</span>（不含编译目录约 2.6 GB：脚本、设备输出、初始噪声、CPU 参考、指标），以及复用的 native 数字来自的 <span class="mono">bench-2026-10-25</span>、<span class="mono">bench-2026-10-26</span>。脚本里写的是绝对路径，要恢复到同样的位置。<span class="mono">handoff/</span> 里有两个 venv 的 pip freeze、Neuron 包版本和模型快照列表。</p></div>
+    <div class="card"><h3><span class="chip wait">只在本机</span>编译结果和模型缓存</h3><p class="muted">编译目录 238 GB、<span class="mono">~/.cache/difflet</span> 248 GB、HF 模型缓存约 384 GB。没有 EBS 快照的话，新机器要重新下载模型、重新编译：native 每个模型 3–10 分钟，AoT 每个模型 17 分钟到 1.6 小时。</p></div>
+    <div class="card"><h3><span class="chip redo">需要你决定</span>怎么保留数据</h3><p class="muted">本机没有 AWS 凭证；上传到仓库的 draft release 被权限拦下了。三个办法：① 终止前给这台机器的 EBS 卷做快照，新机器从快照起，所有东西都在，最省事；② 允许我把打包好的数据上传到仓库的 draft release（不公开，也不会让 clone 变大）；③ 你自己把 <span class="mono">/home/ubuntu/handoff-out/</span> 里的包拷走。</p></div>
+  </div>
+  <div class="card scroll">
+    <table>
+      <thead><tr><th>环境</th><th>版本</th></tr></thead>
+      <tbody>
+        <tr><td>机器</td><td>trn2.3xlarge，LNC=2（4 个逻辑 core，每个 24 GiB HBM），124.8 GiB 内存，12 vCPU</td></tr>
+        <tr><td>Neuron 系统包</td><td class="mono">runtime-lib 2.35.30.0 · collectives 2.35.43.0 · dkms 2.31.7.0 · tools 2.33.38.0</td></tr>
+        <tr><td>native venv <span class="mono">~/venvs/native-312</span></td><td class="mono">torch 2.14.0 · torch-neuronx 2.14.3.0.1 · neuronx-cc 2.28.7631.0</td></tr>
+        <tr><td>AoT 和 CPU 参考 venv <span class="mono">~/venvs/difflet-neuron</span></td><td class="mono">torch 2.9.1 · torch-neuronx 2.9.0.2.15 · neuronx-cc 2.26.6360.0 · NxD 0.19 · NxDI 0.10 · diffusers 0.38.0 · transformers 4.57.6</td></tr>
+        <tr><td>模型版本</td><td class="mono">Wan2.1 38ec498c · HunyuanVideo e8c2aaa6 · LTX-2 47da56e2 · Qwen-Image 75e0b4be</td></tr>
+      </tbody>
+    </table>
+    <p class="muted" style="margin-top:8px">设备计时只有在同样的机型、Neuron SDK 和 venv 上才能和这里的数字放在一起比。版本不同的话，两个后端都要在新机器上重测，不能混用两台机器的数字。CPU 参考和画质指标不受机器影响。</p>
+  </div>
+  <div class="card">
+    <h3 style="margin-bottom:6px">新机器上按这个顺序做</h3>
+    <ol style="margin:0;padding-left:1.3em;display:grid;gap:4px">
+      <li>恢复环境和数据（快照，或者两个 venv、模型、bench 目录），检查 <span class="mono">fuser /dev/neuron*</span> 设备空闲。</li>
+      <li>HunyuanVideo CPU 参考：AoT 噪声那一份，如果 native 噪声那一份在本机没跑完也一起重跑（各约 4 h，用 <span class="mono">scripts/job_cpu_ref_queue_wan_hv.sh</span>，已有 rc 的会自动跳过）。</li>
+      <li>算 HunyuanVideo 两个后端的画质，补完结果文档的画质（二）和总结论。</li>
+      <li>LTX-2 AoT 诊断：双 core、20 步，和已有的 20 步 CPU 参考 <span class="mono">ltx_2/cpu_ref/xcheck_aot_noise_20</span> 比。</li>
+      <li>口径 B：Wan、LTX-2 的 native 关掉 weight store（<span class="mono">DIFFLET_NEURON_WEIGHT_STORE=0</span>）跑冷启动；在新机器上口径 A 也要重测一次，A 和 B 才是同一台机器的数字。</li>
+      <li>第 3 批（bf16，含 umT5 的 F13 检查），然后最后一步（VAE 分区域编译），以及只用 CPU 的 bf16 基准。</li>
+    </ol>
   </div>
 </section>
 
@@ -176,33 +211,38 @@ footer { border-top: 1px solid var(--rule); padding-top: 16px; font-size: 0.85re
       <span><i class="sw" style="background:var(--cpul)"></i>CPU 轻任务（和设备并行）</span>
       <span><i class="sw" style="background:transparent;border:1.5px dashed var(--muted)"></i>待定</span>
     </div>
-    <div class="lanes" data-max="32">
+    <div class="lanes" data-max="40">
       <div class="lane"><div class="ll">设备<small>一次一个，TP4 占满 4 个 core</small></div>
         <div class="track">
           <div class="bar dev" tabindex="0" data-s="0" data-d="2.5" data-tip="第 1 批（已完成，实际约 2.3 h）：准备 + Qwen-Image AoT + LTX-2 AoT">第 1 批 ✓</div>
           <div class="bar dev" tabindex="0" data-s="2.5" data-d="5" data-tip="第 2 批（已完成）：2a Qwen native 核对 + HunyuanVideo AoT（约 2.1 h）→ 2b Wan AoT + HunyuanVideo / Wan native 核对（约 3 h，VAE 编译 1.5 h）→ 2c LTX-2 native 完整测量（约 1 h）">第 2 批 ✓</div>
-          <div class="bar dev" tabindex="0" data-s="21.5" data-d="0.5" data-tip="诊断：LTX-2 AoT 双 core 跑 20 步（复用已有编译目录，约 20 min），区分 AoT 画质变差是双 core 还是 50 步造成的。要等 CPU 参考（二）跑完，内存才够">诊断</div>
-          <div class="bar dev" tabindex="0" data-s="22" data-d="0.75" data-tip="口径 B：Wan 和 LTX-2 的 native 冷启动，关掉 weight store（约 40 min）。放在第 3 批之前，和口径 A 用同样的 dtype">B</div>
-          <div class="bar dev" tabindex="0" data-s="22.75" data-d="4.75" data-tip="第 3 批：Qwen / Wan 的 VAE 改 bf16 后验证精度（约 1 h）、umT5 bf16 精度检查 F13（约 2.5 h）、Qwen 和 Wan native 重测（约 1.25 h）">第 3 批：bf16（含 umT5）</div>
-          <div class="bar ghost" tabindex="0" data-s="27.5" data-d="3" data-tip="最后一步（不急）：Wan / Qwen 的 native VAE 改成分区域编译，照 HunyuanVideo F1a 的做法，然后补测 Wan 和 Qwen native 的端到端">VAE 分区域编译</div>
-          <div class="now" style="left:40%" title="现在"></div>
+          <div class="bar dev" tabindex="0" data-s="29.5" data-d="1" data-tip="新机器：LTX-2 AoT 双 core 跑 20 步（含新编译目录约 18 min），区分 AoT 画质变差是双 core 还是 50 步造成的">诊断</div>
+          <div class="bar dev" tabindex="0" data-s="30.5" data-d="1.25" data-tip="新机器：口径 B（Wan、LTX-2 的 native 冷启动，关掉 weight store），并在同一台机器上重测口径 A">A + B</div>
+          <div class="bar dev" tabindex="0" data-s="31.75" data-d="4.75" data-tip="新机器：第 3 批，Qwen / Wan 的 VAE 改 bf16 后验证精度、umT5 bf16 精度检查 F13、Qwen 和 Wan native 重测">第 3 批：bf16（含 umT5）</div>
+          <div class="bar ghost" tabindex="0" data-s="36.5" data-d="3" data-tip="最后一步（不急）：Wan / Qwen 的 native VAE 改成分区域编译">VAE 分区域</div>
+          <div class="now" style="left:43%" title="现在（10-27 05:20）"></div>
+          <div class="now" style="left:57.5%;background:var(--warn)" title="本机终止（约 11:00）"></div>
         </div></div>
       <div class="lane"><div class="ll">CPU 重任务<small>占满 CPU、内存和磁盘</small></div>
         <div class="track">
-          <div class="bar cpuh" tabindex="0" data-s="7.5" data-d="5.3" data-tip="CPU 参考（一，已完成）：Qwen ×2、LTX-2 ×2，加上画质指标">Qwen、LTX-2 参考 ✓</div>
-          <div class="bar cpuh" tabindex="0" data-s="12.8" data-d="8.7" data-tip="CPU 参考（二，运行中）：Wan ×1（实测每步约 315 s，约 4.4 h）、HunyuanVideo ×2（各约 4 h），合计约 12 h，比原先估计的 8.7 h 长">Wan、HV 参考（运行中）</div>
-          <div class="bar cpul" tabindex="0" data-s="21.5" data-d="0.5" data-tip="算 PSNR / SSIM，写总报告">报告</div>
+          <div class="bar cpuh" tabindex="0" data-s="7.5" data-d="5.3" data-tip="CPU 参考（一，已完成）：Qwen ×2、LTX-2 ×2，加上画质指标">Qwen、LTX-2 ✓</div>
+          <div class="bar cpuh" tabindex="0" data-s="12.8" data-d="4.6" data-tip="Wan 参考（本机，约 05:35 完成），之后算 Wan 画质">Wan</div>
+          <div class="bar cpuh" tabindex="0" data-s="17.4" data-d="4.2" data-tip="HunyuanVideo native 噪声参考（本机，预计 09:45 完成），之后算它的画质">HV native</div>
+          <div class="bar cpuh" tabindex="0" data-s="25" data-d="4" data-tip="新机器：HunyuanVideo AoT 噪声参考（约 4 h）；之后算画质、补完报告">HV AoT</div>
+          <div class="bar cpul" tabindex="0" data-s="29" data-d="0.5" data-tip="新机器：HunyuanVideo 画质和总报告">报告</div>
+          <div class="now" style="left:43%" title="现在"></div>
+          <div class="now" style="left:57.5%;background:var(--warn)" title="本机终止"></div>
         </div></div>
-      <div class="lane"><div class="ll">CPU 轻任务<small>和设备同时进行</small></div>
-        <div class="track tall">
-          <div class="bar cpul" tabindex="0" data-s="0" data-d="1.5" data-tip="F12：修复 LTX-2 Gemma 加载问题，代码加单元测试；单元测试只在设备空闲时跑（运行中）">F12</div>
-          <div class="bar cpul" tabindex="0" data-s="1.5" data-d="3" data-tip="准备 CPU 参考脚本（HunyuanVideo、Wan）、PSNR/SSIM 计算工具、native 噪声捕获">参考脚本和画质工具</div>
-          <div class="bar cpul row2" tabindex="0" data-s="4.5" data-d="3" data-tip="提前准备第 3 批：Wan、Qwen 的 VAE 改 bf16，umT5 改 bf16 的开关和 F13 精度检查脚本，加单元测试（先不合进默认路径，不影响主测量）">第 3 批代码准备</div>
-          <div class="bar cpul row2" tabindex="0" data-s="0" data-d="4.5" data-tip="整理文档、核对数据">文档整理</div>
+      <div class="lane"><div class="ll">换机器<small>本机终止前后</small></div>
+        <div class="track">
+          <div class="bar cpul" tabindex="0" data-s="22.5" data-d="1" data-tip="本机：交接页面、交接文档、数据打包，在终止前完成">交接</div>
+          <div class="bar ghost" tabindex="0" data-s="23.5" data-d="1.5" data-tip="新机器：恢复 venv、模型和测试数据（用快照的话几乎不用时间；从头装要下载约 300 GB 模型）">恢复环境</div>
+          <div class="now" style="left:43%" title="现在"></div>
+          <div class="now" style="left:57.5%;background:var(--warn)" title="本机终止"></div>
         </div></div>
     </div>
-    <div class="axis" aria-hidden="true"><div></div><div class="ticks" data-max="32" data-step="4"></div></div>
-    <figcaption class="muted" style="font-size:0.85rem">时间都是估算。红线是现在。</figcaption>
+    <div class="axis" aria-hidden="true"><div></div><div class="ticks" data-max="40" data-step="4"></div></div>
+    <figcaption class="muted" style="font-size:0.85rem">时间都是估算。红线是现在（10-27 05:20），黄线是本机终止（约 11:00），黄线之后都在新机器上。</figcaption>
   </figure>
 
   <div class="why">
@@ -237,15 +277,15 @@ footer { border-top: 1px solid var(--rule); padding-top: 16px; font-size: 0.85re
 <section aria-labelledby="h-phases">
   <h2 id="h-phases">各批次的内容</h2>
   <ol class="phases card">
-    <li><div class="ph-head"><h3>第 1 批：准备 + Qwen-Image、LTX-2 的 AoT</h3><span class="chip run">运行中</span><span class="muted num">约 2.5 h · 设备</span></div>
+    <li><div class="ph-head"><h3>第 1 批：准备 + Qwen-Image、LTX-2 的 AoT</h3><span class="chip done">已完成</span><span class="muted num">约 2.5 h · 设备</span></div>
       <div><ul><li>建 aot-main worktree，确认 bf16 修复相关的 commit 都在；按方案 A 清理旧的 AoT 编译目录；准备测试脚本和计时 probe。</li><li>每个模型：冷编译 → 冷端到端 → 预热一次 → 3 次热端到端 → 一次画质运行（输出无损文件，并保存初始噪声）。</li></ul></div></li>
-    <li><div class="ph-head"><h3>F12：修复 LTX-2 Gemma 加载问题</h3><span class="chip run">运行中</span><span class="muted num">约 1.5 h · CPU</span></div>
+    <li><div class="ph-head"><h3>F12：修复 LTX-2 Gemma 加载问题</h3><span class="chip done">已完成</span><span class="muted num">约 1.5 h · CPU</span></div>
       <div><ul><li>加载器改成按要加载的 key 选择 index，加单元测试，再在真实 snapshot 上核对 Gemma 的 626 个 key 都能找到。</li></ul></div></li>
-    <li><div class="ph-head"><h3>第 2 批：LTX-2 native、HunyuanVideo / Wan AoT</h3><span class="chip todo">待开始</span><span class="muted num">约 5 h · 设备</span></div>
+    <li><div class="ph-head"><h3>第 2 批：LTX-2 native、HunyuanVideo / Wan AoT</h3><span class="chip done">已完成</span><span class="muted num">约 5 h · 设备</span></div>
       <div><ul><li>Qwen native 核对 hash + 画质运行 → LTX-2 native 完整测量（口径 A）→ HunyuanVideo AoT → Wan AoT（双 core、设备上的 bf16 VAE）→ HunyuanVideo / Wan native 核对 hash + 画质运行。</li></ul></div></li>
-    <li><div class="ph-head"><h3>CPU 参考</h3><span class="chip todo">待开始</span><span class="muted num">约 14 h · CPU</span></div>
-      <div><ul><li>7 份、全部 50 步，按 Qwen ×2 → LTX-2 ×2 → Wan ×1 → HunyuanVideo ×2 的顺序串行。每份跑之前，先核对它的初始噪声和设备运行保存的一致。</li></ul></div></li>
-    <li><div class="ph-head"><h3>画质指标和报告</h3><span class="chip todo">待开始</span><span class="muted num">约 0.5 h · CPU</span></div>
+    <li><div class="ph-head"><h3>CPU 参考</h3><span class="chip run">5 / 7 完成，1 份运行中</span><span class="muted num">约 14 h · CPU</span></div>
+      <div><ul><li>7 份、全部 50 步，按 Qwen ×2 → LTX-2 ×2 → Wan ×1 → HunyuanVideo ×2 的顺序串行。每份跑之前，先核对它的初始噪声和设备运行保存的一致。</li><li>本机：Qwen ×2、LTX-2 ×2 已完成，Wan 约 05:35 完成，HunyuanVideo native 噪声那份预计 09:45 完成。HunyuanVideo AoT 噪声那份移到新机器。</li></ul></div></li>
+    <li><div class="ph-head"><h3>画质指标和报告</h3><span class="chip run">部分完成</span><span class="muted num">约 0.5 h · CPU</span></div>
       <div><ul><li>每帧 PSNR（平均和最差）、SSIM，加上潜变量的 rel-L2 和余弦相似度，汇成 4×2 总表，每个数字注明 commit、日期和日志路径。</li></ul></div></li>
     <li><div class="ph-head"><h3>口径 B</h3><span class="chip todo">待开始</span><span class="muted num">约 0.75 h · 设备</span></div>
       <div><ul><li>Wan 和 LTX-2 的 native 冷启动，关掉 weight store，从原始 checkpoint 读。放在第 3 批之前，和口径 A 用同样的 dtype。</li></ul></div></li>
@@ -355,6 +395,9 @@ footer { border-top: 1px solid var(--rule); padding-top: 16px; font-size: 0.85re
     <table>
       <thead><tr><th>时间</th><th>问题</th><th>采用的做法</th><th>原因</th></tr></thead>
       <tbody id="log-body">
+        <tr><td class="num">10-27 05:20</td><td>保存测试数据：本机没有 AWS 凭证；上传到仓库 draft release 被权限检查拦下</td><td>在本机打好包（<span class="mono">/home/ubuntu/handoff-out/</span>），请你选：EBS 快照（推荐）、允许上传 draft release，或者自己拷走</td><td>仓库是公开的，上传数据算对外发布，要你同意。快照能把编译目录和模型缓存一起保留，新机器省掉几个小时的下载和编译。</td></tr>
+        <tr><td class="num">10-27 05:20</td><td>新机器上测口径 B</td><td>在新机器上把口径 A 也重测一次，再和 B 比</td><td>冷启动受磁盘和机器影响，A 和 B 要在同一台机器上测才能比。</td></tr>
+        <tr><td class="num">10-27 05:15</td><td>本机约 11:00 终止，剩下的两份 HunyuanVideo 参考（各约 4 h）跑不完</td><td>停掉原来的工作流（Wan 参考不受影响），挂一个串接任务：Wan 一结束就跑 HunyuanVideo native 噪声参考，预计 09:45 完成；AoT 噪声那份移到新机器。新工作流在 10:30 前算完 Wan 和 HV native 的画质并提交</td><td>能在终止前跑完的只有一份；先跑 native 这份，是因为 HunyuanVideo native 是这次的主角。设备上的诊断和口径 B 本来就要等参考跑完（内存不够），也放到新机器上。</td></tr>
         <tr><td class="num">10-27</td><td>要不要补 CPU bf16 对 CPU fp32 的基准</td><td>你决定：加进计划，等新机器再跑，这次不执行</td><td>CPU 时间约 24 小时，现在这台机器的 CPU 和内存正被 fp32 参考占满。</td></tr>
         <tr><td class="num">10-26</td><td>LTX-2 AoT 的画质比 10-24 差很多，原因可能是双 core 或 50 步</td><td>加一个约 20 分钟的诊断运行：AoT 双 core 跑 20 步，复用已有编译目录；排在 CPU 参考（二）之后、口径 B 之前</td><td>只有设备运行才能区分这两个原因。AoT LTX-2 会在主机上加载 50 GB 的 fp32 Gemma，和 CPU 参考同时跑内存不够。</td></tr>
         <tr><td class="num">10-26</td><td>Qwen native 的画质比 AoT 低（16.1 对 21.5 dB）</td><td>如实报告，暂不深查，加了两组"错配噪声"的对照比较</td><td>每边只有一个样本；要查清原因需要多个 seed 或逐步对比，超出这次范围，之后可以作为后续工作。</td></tr>
@@ -393,6 +436,8 @@ footer { border-top: 1px solid var(--rule); padding-top: 16px; font-size: 0.85re
     <table>
       <thead><tr><th>事项</th><th>状态</th><th>说明</th></tr></thead>
       <tbody>
+        <tr><td>本机约 10-27 11:00 终止</td><td><span class="chip redo">需要你决定</span></td><td>测试数据只在本机，需要选一种办法保留（见“交接”一节）。没保留的话，新机器要重跑设备测量才能补 HunyuanVideo 的画质。</td></tr>
+        <tr><td>新机器的软件版本</td><td><span class="chip wait">风险</span></td><td>Neuron SDK 或 venv 版本不同的话，设备计时不能和这里的数字混用，两个后端要在新机器上一起重测。</td></tr>
         <tr><td>第 3 批包括 umT5</td><td><span class="chip done">已确认</span></td><td>umT5 写死成 fp32，要先过 F13 的精度检查（约 2.5 h），不通过就保留 fp32。第 3 批放在报告之后。</td></tr>
         <tr><td>磁盘</td><td><span class="chip wait">风险</span></td><td>新的编译目录预计 216–246 GB，清理旧目录后才够；剩余空间低于 80 GB 时会停下来报告。</td></tr>
         <tr><td>HunyuanVideo AoT 的初始噪声</td><td><span class="chip wait">风险</span></td><td>AoT 不保存初始噪声，只能在 CPU 上复现（torch 2.9 的 bf16 随机数），没法直接核对，所以只比画面指标。</td></tr>
@@ -406,6 +451,7 @@ footer { border-top: 1px solid var(--rule); padding-top: 16px; font-size: 0.85re
 
 <footer>
   <p>计划文档：<span class="mono">docs/superpowers/plans/2026-10-26-four-model-native-vs-aot-metrics.md</span>（分支 <span class="mono">feat/hunyuan-neuron</span>）。结果会写进 <span class="mono">benchmark/trn2/four_model_native_vs_aot_2026-10-26.md</span>，原始日志在 <span class="mono">/home/ubuntu/bench-2026-10-26-4m/</span>。</p>
+  <p>交接文档：<span class="mono">docs/superpowers/plans/2026-10-27-handoff.md</span>。</p>
   <p>时间都是估算；可复用的数字来自 2026-10-25 / 10-26 的测量。</p>
 </footer>
 
@@ -414,7 +460,7 @@ footer { border-top: 1px solid var(--rule); padding-top: 16px; font-size: 0.85re
 <script>
 (function () {
   var g = document.getElementById('gantt');
-  var max = 32;
+  var max = 40;
   var ticks = g.querySelector('.ticks');
   for (var t = 0; t <= max; t += 4) {
     var s = document.createElement('span');
