@@ -38,8 +38,8 @@ All values were re-read from the run records (`summary.json`, `stats_gen1-3.txt`
 | | AoT | 801.8 ms | 133.0 s | 617.5 s | 4526.7 s | 15.53 GiB | pending CPU references | 2026-10-26 at main `540e5f0`: `B/hunyuan_video/aot_main_tp4/` |
 | Qwen-Image, 1024x1024, g4.0 | native | 359.0 ms | 82.3 s | 502.0 s | 187.0 s | 10.81 GiB on the DiT cores, 13.85 on the VAE core | 16.11 dB / 0.823 (latent cosine 0.872), against the CPU fp32 reference from native's noise | *reused*: 2026-10-25 at `4f6e1de`, `/home/ubuntu/bench-2026-10-25/qwen_image/native_tp4/`. Confirmed by hash on 2026-10-26 at `a87d89c`: `B/qwen_image/native_tp4_hashcheck/` |
 | | AoT | 360.6 ms | 73.7 s | 515.6 s | 1209.9 s | 10.10 GiB | 21.48 dB / 0.912 (latent cosine 0.961), against the CPU fp32 reference from AoT's noise | 2026-10-26 at main `540e5f0`: `B/qwen_image/aot_main_tp4/` |
-| Wan2.1 14B, 480x832x9, g5.0 (CFG) | native | 1063.6 ms | 128.5 s | 542.7 s (weight store) | 600.3 s | 15.15 GiB on the DiT cores, 18.40 on the VAE core | pending CPU references | *reused*: 2026-10-25 at `8b2408c`, `/home/ubuntu/bench-2026-10-25/wan2_1/native_tp4/`. Confirmed by hash on 2026-10-26 at `4f5d46a`: `B/wan2_1/native_tp4_hashcheck/` |
-| | AoT | 956.4 ms | **123.16 s** with `--host-vae` (A2) | **449.4 s** with `--host-vae` (A2) | 5935.7 s (the transformer stage alone: 430.5 s) | 10.34 GiB | pending CPU references. The device-VAE frames are corrupted: 12.41 dB against a host fp32 decode | 2026-10-26 at main `540e5f0`: `B/wan2_1/aot_main_tp4_twocore/` and `…_hostvae/` |
+| Wan2.1 14B, 480x832x9, g5.0 (CFG) | native | 1063.6 ms | 128.5 s | 542.7 s (weight store) | 600.3 s | 15.15 GiB on the DiT cores, 18.40 on the VAE core | 22.66 dB / 0.885 (latent cosine 0.967), against the one CPU fp32 reference both backends share (same noise) | *reused*: 2026-10-25 at `8b2408c`, `/home/ubuntu/bench-2026-10-25/wan2_1/native_tp4/`. Confirmed by hash on 2026-10-26 at `4f5d46a`: `B/wan2_1/native_tp4_hashcheck/` |
+| | AoT | 956.4 ms | **123.16 s** with `--host-vae` (A2) | **449.4 s** with `--host-vae` (A2) | 5935.7 s (the transformer stage alone: 430.5 s) | 10.34 GiB | 21.40 dB / 0.853 (latent cosine 0.954) for the A2 host fp32 decode, against the same shared reference. The device-VAE frames are corrupted: 11.72 dB / 0.321 against the reference, 12.41 dB against a host fp32 decode | 2026-10-26 at main `540e5f0`: `B/wan2_1/aot_main_tp4_twocore/` and `…_hostvae/` |
 | LTX-2, 480x704x49, g1.0 | native | 350.5 ms | 92.46 s | 594.76 s (Gemma-3 weight store) | 327.59 s | 16.51-16.52 GiB | 18.06 dB / 0.811 (latent cosine 0.930 video, 0.989 audio), against the CPU fp32 reference from native's noise | 2026-10-26: compile at `999c434`, the other runs at `009d3dd`. `B/ltx_2/native_tp4/` |
 | | AoT | 400.1 ms | 66.55 s | 778.1 s | 1052.2 s | 9.81 GiB | 16.21 dB / 0.660 (latent cosine 0.725 video, 0.980 audio), against the CPU fp32 reference from AoT's noise. Far below the 2026-10-24 single-core 20-step run (cosine 0.991); not yet explained, see the LTX-2 phase 4 section | 2026-10-26 at main `540e5f0`: `B/ltx_2/aot_main_tp4_twocore/` |
 
@@ -997,6 +997,70 @@ Tooling only, 2026-10-26 23:50 to 2026-10-27 00:50 UTC. No 50-step reference has
 
 **For the metrics stage:** the Wan and HunyuanVideo device `out.pt` files (and Wan's `host_fp32_frames.pt`) are raw decodes, (1,3,F,H,W) in about [−1,1]. `quality_metrics.py` reads (1,F,3,H,W) in [0,1]. So each frames input, device and reference alike, goes through the same map before the uint8 rule: diffusers' `(x/2 + 0.5).clamp(0,1)`, permuted to (1,F,3,H,W). The reference's `out.pt` is exactly that map of its `out_raw.pt`.
 
+## Quality vs CPU fp32 reference (part 2: Wan2.1 and HunyuanVideo)
+
+2026-10-27, CPU only; the Neuron device was not touched. **Wan2.1 is done. HunyuanVideo is not**: its native-noise reference started at 05:33 UTC (unit `cpuref_chain_hv_native`, about 4 h), and its AoT-noise reference moves to the next machine because this host is terminated at about 11:00 UTC.
+
+**Wan2.1 reference `B/wan2_1/cpu_ref/ref_50`** (unit `cpuref_wan_50`, `cpu_ref_wan.py` `02b0b9e3…`, diffusers `WanPipeline` in fp32, 480x832x9, 50 steps, guidance 5.0, negative prompt `""`)
+- **Finished** 2026-10-27 05:33:10 UTC, `rc` 0. Wall 16856.6 s (4.68 h; `/usr/bin/time` 4:40:59), against the 4.2 h estimate.
+  - Steady step 316.2 s (median), against 295 s in the smoke. Step 1 took 493.4 s (the cold read of the mmapped DiT).
+  - Steps 17–21 (02:20–02:57 UTC) took 368–487 s. In that window `ref_50_contention.log` shows load up to 10.5, with other processes on the Neuron device and a `pytest` from another session. The reference is CPU only, so this changes the time, not the result.
+- **Memory:** peak VmRSS 62.6 GiB (`ru_maxrss` 62.6), peak RssAnon 8.77 GiB (the fp32 checkpoint is file-backed), lowest MemAvailable 112.5 GiB.
+- **Checks** (`reference.json`; `B/wan2_1/quality_part2/ref50_brief.txt`, `schedule_check_ref50.json`):
+  - **Injection is bit-exact:** the first DiT `hidden_states` has raw sha256 `16aeaed7…`, equal to the fp32 dump shared by both backends (`03b6284b…`), and it round-trips to the dump's bits.
+  - 100 DiT calls in the order cond, uncond, …; the first DiT timestep is 999 (int64).
+  - **50-step schedule:** `schedule_check_wan.py --steps 50` runs both device copies of `difflet/models/wan/pipeline.py`. They agree with each other, and the reference's timesteps and sigmas are identical (n 50, max |Δt| 0). `ok: true`, CPU only.
+  - `out.pt` equals `(out_raw/2 + 0.5).clamp(0,1)` bit for bit, both inside the run and again in `frames_map.py --check-equal`.
+  - CPU only: no Neuron module loaded, no `/dev/neuron*` fd.
+- **Outputs:** `final.pt` `a0ae2918…`, `out_raw.pt` `bfa6b76b…`, `out.pt` `13385b64…`, `strip.png` `f6889b47…` (frames 0, 2, 4, 6, 8).
+
+**Metrics run.** `B/scripts/quality_part2_wan.sh` (`ad1bf58e…`; the version prepared at the tooling stage is kept as `quality_part2_wan.as-prepared-2026-10-27.sh`) ran in the foreground at 05:34 UTC with 4 threads, beside the HunyuanVideo reference. Its output is in `B/wan2_1/quality_part2/`.
+- The definitions are part 1's, unchanged: `quality_metrics.py` `8f6e1b18…`, the same uint8 rule, PSNR per frame (mean and worst), SSIM Wang 2004, and latent rel-L2 / cosine in float64 on the loop-output `final.pt` (1,16,3,60,104).
+- **The one added step:** each raw (1,3,F,H,W) decode goes through `frames_map.py` (`14ef6365…`), `(float32(x)/2 + 0.5).clamp(0,1)` permuted to (1,F,3,H,W). That covers the native `out.pt` `8d8a1779…`, the A2 `host_fp32_frames.pt` `7654a612…`, the AoT device-VAE `out.pt` `4380f37c…` and the reference's `out_raw.pt`. The map log is `wan_frames_map.jsonl`.
+- **All 9 frames are compared**, with no resizing, cropping or alignment. Native and AoT start from the same noise, so one reference serves both backends, and a direct native-vs-AoT pixel comparison is valid for Wan (unlike the other three models).
+
+**Sanity checks** (all pass)
+
+| check | expected | result | file |
+|---|---|---|---|
+| `--selftest` | PASS | PASS | `selftest.txt` |
+| identical pair: `ref_50` `out.pt` and `final.pt` against themselves | inf, SSIM 1, rel-L2 0, cosine 1 | inf (worst inf) / 1.000000 / 0 / 1.000000 | `sanity_identical_wan.json` |
+| `frames_map` of the reference's `out_raw.pt` against its own `out.pt` | bit-identical | true | `wan_frames_map.jsonl` |
+| known pair: AoT device-VAE frames against the A2 host fp32 decode (phase 2: mean 12.41 dB, worst 9.36 dB) | the same | 12.410 / 9.359 dB | `sanity_known_wan_devvae_vs_host.json` |
+
+**Results** (Wan2.1 480x832x9, 50 steps, seed 42, one shared noise)
+
+| pair | PSNR mean (worst frame) | SSIM mean (worst frame); R / G / B | latent rel-L2 / cosine | file |
+|---|---:|---:|---:|---|
+| native device q1 vs `ref_50` | **22.66 dB** (20.32, frame 0) | **0.885** (0.840, frame 0); 0.879 / 0.892 / 0.885 | 0.256 / **0.967** | `wan_native_vs_ref.json` |
+| AoT q1, A2 host fp32 decode of the device latents, vs `ref_50` | **21.40 dB** (18.98, frame 0) | **0.853** (0.797, frame 0); 0.845 / 0.862 / 0.851 | 0.299 / **0.954** | `wan_aot_hostvae_vs_ref.json` |
+| AoT q1, device bf16 VAE frames (corrupted), vs `ref_50` | 11.72 dB (9.24, frame 3) | 0.321 (0.189, frame 4); 0.300 / 0.356 / 0.307 | same latents as the A2 row | `wan_aot_devicevae_vs_ref.json` |
+| AoT q1 (A2) vs native device q1, direct, native as the reference side | 25.20 dB (22.13, frame 0) | 0.908 (0.866, frame 0); 0.905 / 0.914 / 0.906 | 0.215 / 0.977 | `wan_aot_hostvae_vs_native.json` |
+
+- **Per frame, PSNR:**
+  - native vs ref: 20.32, 22.21, 22.65, 22.96, 23.05, 23.01, 23.15, 23.24, 23.38;
+  - AoT A2 vs ref: 18.98, 20.76, 21.30, 21.65, 21.75, 21.99, 22.03, 22.06, 22.05;
+  - AoT device VAE vs ref: 16.68, 12.30, 10.79, 9.24, 10.90, 12.01, 11.15, 10.91, 11.53.
+- **Reference timing and memory**, for the table: wall 16856.6 s (4.68 h), peak RSS 62.6 GiB (8.77 GiB anonymous).
+- **Latent rel-L2 is not symmetric.** Native vs AoT gives 0.2146 with native's latents in the denominator, and 0.2159 with AoT's, which is phase 2's figure (`latents_vs_1025.json`). The native probe `final.pt` (`c033e163…`) holds the same values as `work/latents.pt` (`3cafa271…`) (`torch.equal`); only the serialization differs.
+
+**What the frames show.** I opened the reference `strip.png` and the four mapped strips `strip_wan_{ref50,native_q1,aot_q1_hostfp32,aot_q1_devicevae}_02468.png`.
+- **The reference shows the prompt:** a sharp red fox trotting right across snow, in front of dark trunks in a snowy forest, in the same pose and place in frames 2–8.
+- **Frame 0 of the reference is noisy too.** It has coloured blocky speckle over the background, and the fox is clean. The native and AoT A2 frame 0 look the same. So the speckle comes from the model or VAE on the first frame, not from the device, and it is why frame 0 is the worst frame in every row.
+- **Native and AoT A2** both show the same fox in the same place, pose and framing as the reference, frame for frame. The differences are in the background trunks and snow texture.
+- **The AoT device-VAE strip** is clean at frame 0. Frames 2–8 show only a grey-brown fox silhouette under coloured block noise, the corruption already recorded in the Wan2.1 section. Against the reference it scores 11.7 dB / SSIM 0.32. That puts a number on the defect: about 10 dB and 0.53 SSIM below the host decode of the same latents.
+
+**Reading the numbers**
+- **Both backends follow the fp32 trajectory closely:** latent cosine 0.967 for native and 0.954 for AoT, SSIM 0.885 and 0.853. Native is slightly closer on every metric (+1.3 dB, +0.032 SSIM, +0.013 cosine).
+  - This is one seed, so the gap is small and should not be over-read. The two backends also differ in umT5 precision: native runs umT5 in fp32 on the device, AoT in bf16 (Method).
+- **Native and AoT are closer to each other** (25.2 dB / 0.908 / cosine 0.977) than either is to the reference. *Inference:* they share the bf16 DiT and bf16 timestep rounding (999 → 1000), which the reference does not.
+- **Compared with part 1**, Wan sits above Qwen-Image native and the LTX-2 rows in SSIM and latent cosine, and close to Qwen-Image AoT (0.912 / 0.961).
+
+**HunyuanVideo: not measured on this host**
+- `ref_native_noise_50` started at 05:33:24 UTC (`B/cpu_ref_queue_wan_hv.log`) and should finish at about 09:30 UTC. Its metrics (HunyuanVideo native q1 against it) are the next step if it finishes in time.
+- `ref_aot_noise_50`, from the AoT bf16 noise `B/hunyuan_video/aot_main_tp4/q1/initial.pt` `e13a3f46…`, **moves to the next machine**. It needs about 4 h and cannot finish before the host termination. The command is `job_cpu_ref_queue_wan_hv.sh` run (3), and the inputs and expected hashes are listed in "Phase 4 part 2 preparation".
+- **Known differences for those rows:** the device DiT guidance is 6016 (bf16) against 6000, the device timesteps are bf16, and the AoT VAE tiling caps PSNR at about 42.5 dB.
+
 ## Next
 
 - **Phase 4 (CPU):** the 7 references, 50 steps each, in fp32, Qwen-Image and LTX-2 first. Inputs:
@@ -1013,11 +1077,13 @@ Tooling only, 2026-10-26 23:50 to 2026-10-27 00:50 UTC. No 50-step reference has
     - native noise: fp32, `B/hunyuan_video/native_tp4_hashcheck/q1/initial.pt`;
     - AoT noise: bf16, `B/hunyuan_video/aot_main_tp4/q1/initial.pt`.
     - Caveat: the AoT VAE tiling caps frame PSNR at about 42.5 dB (`hunyuan_video_neuron.md`).
-  - HunyuanVideo and Wan2.1 tooling: **ready** (section "Phase 4 part 2 preparation"). The three references are queued in `B/scripts/job_cpu_ref_queue_wan_hv.sh`, about 12 h; not started.
+  - HunyuanVideo and Wan2.1 tooling: **ready** (section "Phase 4 part 2 preparation").
+  - Wan2.1 `ref_50`: **done** 2026-10-27 05:33 UTC (section "Quality vs CPU fp32 reference (part 2)").
+  - HunyuanVideo `ref_native_noise_50`: started 05:33 UTC as `cpuref_chain_hv_native` (about 4 h). `ref_aot_noise_50` **moves to the next machine** (host termination about 11:00 UTC).
   - **Wan2.1:** one reference serves both backends: noise `03b6284b…` (raw `16aeaed7…`).
     - Native frames: `B/wan2_1/native_tp4_hashcheck/q1/out.pt`.
     - AoT frames: use the fp32 host decode `B/wan2_1/aot_main_tp4_twocore/q1_host_vae/host_fp32_frames.pt`, which is the A2 placement, because the device-VAE frames are corrupted.
-- **Phase 5:** PSNR / SSIM fill the last column of the summary table. Part 1 (Qwen-Image and LTX-2) is **done**: section "Quality vs CPU fp32 reference (part 1)". Part 2 (HunyuanVideo and Wan2.1) waits for their references.
+- **Phase 5:** PSNR / SSIM fill the last column of the summary table. Part 1 (Qwen-Image and LTX-2) is **done**: section "Quality vs CPU fp32 reference (part 1)". Part 2: Wan2.1 **done** (section "Quality vs CPU fp32 reference (part 2)"); HunyuanVideo waits for its references.
 - **Phase 6:** definition B, native cold without the weight store, for Wan2.1 and LTX-2.
 - **Follow-up on main:** the compiled bf16 Wan VAE (`trainium/wan/vae.py`) corrupts frames on the device. Wan2.2 on 2026-10-24 shows the same kind of corruption.
 
