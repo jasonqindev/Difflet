@@ -14,6 +14,8 @@ stage of its own on one core (_stage_vae_neuron, fp32 eager), or on the host wit
 --text-encoder-dtype bf16 and --vae-dtype bf16 are the opt-ins of phase 3 of the 2026-10-26
 native-vs-AoT plan (umT5 and the device decoder in bf16); without them nothing changes, and with
 them the stage keys gain a field (_component_dtype_keys), so existing artifacts keep theirs.
+--vae-exec-mode compile (phase 7 of that plan) compiles the vae stage's decoder region by region
+instead of running it eager, and keys the vae stage the same way.
 DP replicas (--dp) are separate torchrun launches; each one's rank 0 claims the requests
 (_replica_requests). The stage cache key names the backend and exec mode, and --cache-dir
 becomes DIFFLET_COMPILE_CACHE (the NEFF/HLO cache root) unless that is exported. Unset,
@@ -53,6 +55,8 @@ from difflet.cli.orchestrators.torchrun import (
     torchrun_stage_keys,
     torchrun_unsupported_options,
     vae_dtype_conflict,
+    vae_exec_mode_conflict,
+    vae_exec_mode_key,
 )
 
 # Model id comes from the CLI (--model-id); both Wan 2.2 A14B (MoE, dual
@@ -253,10 +257,12 @@ def _component_dtype_keys(stage: str, args: argparse.Namespace) -> dict:
     backends, whose paths these flags do not change. Torch-free."""
     if _torchrun_backend() is None:
         return {}
+    # --vae-exec-mode compile (phase 7) keys the vae stage the same way.
+    keys = vae_exec_mode_key(args) if stage == "vae" else {}
     flag = {"transformer": "text_encoder_dtype", "vae": "vae_dtype"}.get(stage)
     if flag is None or getattr(args, flag, None) != "bf16":
-        return {}
-    return {flag: component_dtype("bf16")}
+        return keys
+    return {**keys, flag: component_dtype("bf16")}
 
 
 class WanOrchestrator(ModelOrchestrator):
@@ -280,9 +286,10 @@ class WanOrchestrator(ModelOrchestrator):
             runs="tensor, sequence, CFG and context parallelism at one static shape, DP "
             "replicas and TeaCache",
         )
-        # --vae-dtype sets the device decoder: refused with --host-vae (the AoT backends keep
-        # their own paths for these flags).
-        refuse_torchrun_conflicts([c for c in (vae_dtype_conflict(self.args),) if c])
+        # --vae-dtype and --vae-exec-mode set the device decoder: refused with --host-vae (the
+        # AoT backends keep their own paths for these flags).
+        refuse_torchrun_conflicts([c for c in (vae_dtype_conflict(self.args),
+                                               vae_exec_mode_conflict(self.args)) if c])
 
     def _reject_dual_expert_misuse(self) -> None:
         """--dual-expert off the neuron backend, or --guidance-scale-2 without it: print one
@@ -608,6 +615,7 @@ class WanOrchestrator(ModelOrchestrator):
             z_dim = int(json.load(f)["z_dim"])
         h, w, frames_count = args.height or 480, args.width or 832, args.num_frames or 9
         dtype = getattr(torch, component_dtype(getattr(args, "vae_dtype", None)))
+        exec_mode = getattr(args, "vae_exec_mode", None) or "eager"
 
         def build(parallel):
             return NeuronWanVaeDecoderApplication(
@@ -615,6 +623,7 @@ class WanOrchestrator(ModelOrchestrator):
                 latent_shape=(1, z_dim, (frames_count - 1) // 4 + 1, h // 8, w // 8),
                 parallel=parallel,
                 dtype=dtype,
+                exec_mode=exec_mode,
                 device="neuron",
             )
 
@@ -722,6 +731,8 @@ class WanOrchestrator(ModelOrchestrator):
             parts += ["--text-encoder-dtype", a.text_encoder_dtype]
         if getattr(a, "vae_dtype", None):
             parts += ["--vae-dtype", a.vae_dtype]
+        if getattr(a, "vae_exec_mode", None):
+            parts += ["--vae-exec-mode", a.vae_exec_mode]
         if getattr(a, "guidance_scale_2", None) is not None:
             parts += ["--guidance-scale-2", str(a.guidance_scale_2)]
         if getattr(a, "teacache_cadence", None) is not None:
