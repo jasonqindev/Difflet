@@ -7,6 +7,8 @@
 
 PSNR / SSIM: **Qwen-Image and LTX-2 have numbers** (phase 4, two 50-step CPU fp32 references each, sections "Phase 4: Qwen-Image CPU fp32 references" and "Phase 4: LTX-2 CPU fp32 references", collected with the tool sanity checks and a look at the references in "Quality vs CPU fp32 reference (part 1)"). Wan2.1 (both backends, one shared reference) and HunyuanVideo native have numbers too (section "Quality vs CPU fp32 reference (part 2)"). HunyuanVideo AoT has numbers too, from its AoT-noise reference run on 2026-10-27 on the replacement host (19.65 dB / 0.774, section "HunyuanVideo AoT vs its CPU fp32 reference"). All 8 cells now have PSNR / SSIM. Cold e2e is definition A in the tables above. Definition B (native without its weight store, Wan2.1 and LTX-2 only, plan phase 6) was measured on 2026-10-27 on a replacement host with the same root volume: Wan2.1 762.55 s and LTX-2 785.40 s, against A 533.89 s and 603.23 s on that host (section "2026-10-27, new host").
 
+**Phase 3 supplement (2026-10-27/28, new host):** native Qwen-Image and Wan2.1 re-measured with the opt-in bf16 VAE (and bf16 umT5 for Wan) after every accuracy gate passed. Wan2.1 cold e2e A drops to 454.7 s (533.89 s fp32 on that host) and its peak HBM to 11.83 GiB per core, at 22.41 dB / 0.880 against the reference (fp32: 22.66 / 0.885). Qwen-Image's latents are bit-identical and its quality is unchanged (section "Phase 3: bf16 VAE and umT5"). The fp32 numbers above stay the headline, and bf16 is not a default.
+
 **Device:** trn2.3xlarge: 1 device, 4 NeuronCores (LNC=2, 24 GiB HBM per core), 12 vCPU, 124.8 GiB RAM, one EBS root volume. The host is the same one used for `native_vs_aot_tp4_2026-10-25.md`.
 
 **Raw evidence:** kept out of git, under `/home/ubuntu/bench-2026-10-26-4m/` on the benchmark host (`B` below).
@@ -1274,6 +1276,181 @@ Tooling only, 2026-10-26 23:50 to 2026-10-27 00:50 UTC. No 50-step reference has
 - The matched AoT pair is 10.7 dB and 0.31 SSIM above its mismatched-noise control, which confirms the pairing.
 - Unlike LTX-2 AoT (video cosine 0.725 at 50 steps), HunyuanVideo AoT shows no large 50-step drift.
 
+## Phase 3: bf16 VAE and umT5 (2026-10-27, new host)
+
+**A supplement.** The fp32 numbers in the summary table stay the headline. bf16 is **not** the default anywhere: every switch below is an opt-in flag, and making one the default needs the user's approval (plan, "Reporting and defaults").
+
+**What ran.** The plan's "Phase 3 device validation runbook" was run on the replacement host from 2026-10-27 22:35 to 2026-10-28 00:00 UTC.
+- **Code:** native backend at `eab8fc8` (clean), which contains the opt-in commits `e809595`, `c706e39` and `1832960`.
+- **Preconditions** (22:33 UTC):
+  - `fuser /dev/neuron*` was empty, and no `cpu_ref_` process was running. `ref_aot_noise_50` had finished with `rc` 0.
+  - 122 GiB MemAvailable and 129 GB free on `/`.
+  - Phase 6 (B) had already run, so nothing had to run before step 4.
+- **Supervision:**
+  - Each device step ran as a `systemd-run --user` unit, one at a time: `p3_gates2` for steps 1-2 and `p3_cells` for steps 4-5. The metrics ran afterwards as `p3_quality`, CPU only.
+  - Every unit was watched with bounded wait loops.
+  - Every run returned rc 0 and released the device (`device_released: true`).
+- **Evidence:** `B/phase3/` (`gates.log`, `cells.log`, `f13/`, `vae_wan/`, `vae_qwen/`, `quality/`), plus the new cells `B/qwen_image/native_tp4_p3/` and `B/wan2_1/native_tp4_p3/` on the fresh roots `B/roots/{qwen_image,wan21}_native_tp4_p3`. No existing cell or root was written.
+
+### Gates (runbook steps 1-3)
+
+**Step 1, F13: umT5 bf16 vs fp32 at TP4.** Run with `f13_umt5_bf16_check.py` (`5f549677…`) through the native prompt path, with the weight store off; output in `B/phase3/f13/`. The embeddings were identical on all 4 ranks: **PASS**.
+
+| prompt | valid tokens | cosine (gate ≥ 0.995) | worst token cosine | max abs | rel-L2 | after the bf16 cast the DiT sees: cosine / max abs |
+|---|---:|---:|---:|---:|---:|---|
+| `"a cinematic shot of a red fox running through a snowy forest"` | 16 | **0.999481** | 0.998515 | 3.11e-2 | 3.22e-2 | 0.999479 / 3.13e-2 |
+| `""` (the CFG negative prompt) | 1 | **0.999951** | 0.999951 | 4.61e-3 | 1.01e-2 | 0.999953 / 3.91e-3 |
+
+- **Padding:** the padded rows are exactly zero in both dtypes.
+- **Per-rank bytes:** fp32 5.68 GB, bf16 2.84 GB.
+- **Load:**
+  - fp32: 192.5 s from a cold page cache (checkpoint read 172.4 s, warm-up 13.8 s).
+  - bf16: 11.3 s, but it ran right after the fp32 load on a warm page cache, so it is **not** a cold figure. The cold bf16 figure is the Wan cell's store read below.
+
+**Step 2, VAE gate: bf16 vs fp32 device decode of the same latents.** Run with `vae_bf16_check.py` (`b87a3338…`) on one core, with the phase-2 q1 latents. Both models **PASS**.
+
+| model | bf16 vs fp32 device, PSNR mean (worst frame) / SSIM (gate ≥ 50 dB) | fp32 device vs diffusers fp32 host | bf16 device vs host | decode s, first / repeat: fp32 → bf16 |
+|---|---|---|---|---|
+| Wan2.1, 480x832x9 | **56.18 dB** (55.89, frame 0) / 0.99932 | 97.44 dB / 1.00000 | 56.18 dB / 0.99932 | 172.2 / 3.38 → 122.2 / 1.85 |
+| Qwen-Image, 1024x1024 | **56.72 dB** / 0.99881 | 99.49 dB / 1.00000 | 56.72 dB / 0.99881 | 84.0 / 0.92 → 52.7 / 0.41 |
+
+- Both pass at the level of HunyuanVideo's bf16 decoder (56.07 dB). Wan's per-frame range is 55.89-56.50 dB.
+- The fp32 device decode matches the host decode to 97-99 dB, so the device path itself is faithful.
+- **First decode:** it includes the eager per-op kernel compile into `p3_scratch`.
+- **Peak HBM:** the reported peak (11.84 GiB for Wan, 9.30 for Qwen-Image) is a process-wide maximum over both dtypes, so it does not isolate bf16. The cells below do.
+
+**Step 3, flags chosen** (every gate passed):
+- Qwen-Image: `--vae-dtype bf16`.
+- Wan2.1: `--vae-dtype bf16 --text-encoder-dtype bf16`.
+
+### Re-measured cells (runbook steps 4 and 5)
+
+The commands are the runbook's (`job_phase3_cells.sh`, `d3b1cb53…`; harness `bench4m.py` `6c52b12e…`, unchanged). Every run is at `eab8fc8` and clean, and `difflet` was imported from the worktree in every process (precheck and probe).
+- The new stage manifests carry the new fields: `vae_dtype: bfloat16` on the Wan and Qwen-Image vae stages, `text_encoder_dtype: bfloat16` on the Wan transformer stage. All other key fields match the fp32 roots. The Qwen-Image DiT key is the same `f8267c1d…`.
+- **Statistics:** `stats_gen1-3.txt` from `bench4m_stats.py`. The breakdowns come from `B/scripts/p3_breakdown.py` (`d39ea789…`, which reads `summary.json`).
+
+| model | metric | fp32 native (summary table) | **p3 native (bf16 flags)** | p3 vs fp32 | AoT | p3 vs AoT |
+|---|---|---|---|---:|---|---:|
+| Qwen-Image | DiT step median / p10 / p90 | 359.0 / 358.2 / 360.1 ms | **360.4** / 359.6 / 361.9 ms | +0.4% | 360.6 ms | −0.1% |
+| | warm e2e, mean of gen1-3 | 82.3 s (81.42, 82.13, 83.41) | **78.4 s** (77.06, 75.03, 83.08; gen0 86.06) | −4.8% | 73.7 s | +6.4% |
+| | cold e2e A | 502.0 s (2026-10-25, old host) | **519.2 s** | +3.4% | 515.6 s | +0.7% |
+| | compile | 187.0 s (generate launch 91.3, vae launch 93.8) | **194.2 s** (98.8 / 92.9) | +3.8% | 1209.9 s | −84.0% |
+| | peak HBM per core (neuron-monitor) | 10.81 GiB DiT cores, 13.45-13.85 VAE core | **10.81 GiB on every core** (the VAE core no longer stands out; rank-0 VAE `max_memory_allocated` 9.30 → 5.22 GiB) | DiT cores 0%, VAE core at least −22% | 10.10 GiB | +7.0% |
+| | PSNR / SSIM vs `ref_native_noise_50` | 16.11 dB / 0.823 | **16.11 dB / 0.823** (16.106 vs 16.105) | 0 | 21.48 / 0.912 (own noise) | |
+| | output | PNG `b1906d53…`, latents `4da4c89e…` | PNG `dc302d76…`, latents **`4da4c89e…`** | latents identical | | |
+| Wan2.1 | DiT step median / p10 / p90 | 1063.6 / 1061.5 / 1065.9 ms | **1064.9** / 1063.7 / 1069.0 ms | +0.1% | 956.4 ms | +11.3% |
+| | warm e2e, mean of gen1-3 | 128.5 s (125.98, 130.82, 128.83) | **127.9 s** (131.14, 122.47, 130.19; gen0 122.63) | −0.5% | 123.16 s (A2, `--host-vae`) | +3.9% |
+| | cold e2e A | 542.7 s (old host); **533.89 s on this host** | **454.7 s** | **−16.2%** (−14.8% on this host) | 449.4 s (A2) | **+1.2%** |
+| | compile | 600.3 s (generate launch 428.8, vae launch 169.7) | **638.2 s** (457.3 / 178.4) | +6.3% | 5935.7 s (transformer stage alone 430.5 s) | −89.2% (+48.2% against the transformer stage) |
+| | peak HBM per core (neuron-monitor) | 15.15 GiB DiT cores, 18.12-18.40 VAE core | **11.83 GiB** on every core (11.95 once, in gen2) | **−21.9%** DiT cores, at least **−35%** VAE core | 10.34 GiB | +14.4% |
+| | PSNR / SSIM vs `ref_50` (shared noise) | 22.66 dB / 0.885 | **22.41 dB / 0.880** | −0.25 dB / −0.0054 | 21.40 / 0.853 (A2) | +1.0 dB / +0.027 |
+| | output | mp4 `9b914e81…`, latents `3cafa271…` | mp4 `2da4edd4…`, latents `fbd0306e…`, the same in cold, gen0-3 and q1 | latents change (umT5) | | |
+
+**Qwen-Image: what changed.** The output changes **only through the VAE**.
+- q1's noise (`initial.pt` `95a4306b…`), loop output (`final.pt` `94d160cb…`) and `work/latents.pt` (`4da4c89e…`) are bit-identical (`torch.equal`) to the fp32 hash check (`B/phase3/quality/qwen_noise_latents_check.json`).
+- The PNG differs: it is 56.72 dB / SSIM 0.9988 from the fp32-VAE PNG, which is the step-2 gate value reproduced through the CLI.
+- I opened `out.png`: a red fox trotting across snow in a snowy forest, on prompt.
+- **Timing:** the bf16 decoder is faster, but the effect on e2e is below the run-to-run spread.
+  - The warm decode drops from 2.52 to 1.68 s. The vae launch as a whole is unchanged within noise: 18.8-20.8 s against 18.7-19.5 s.
+  - The −3.9 s in the warm mean comes mostly from rank start-up spread. Rank start to `app_load` is 11.3-21.0 s here and 21.5-24.4 s in the 2026-10-25 cell.
+  - **Cold:**
+    - The vae stage is 0.7 s shorter (15.26 vs 15.93 s), and the DiT and text-encoder loads are equal (checkpoint 310.96 vs 310.88 s, text encoder 99.71 vs 99.62 s).
+    - The +17.2 s comes from rank start-up: 27.0 s from rank start to `app_load`, against 13.3 s in the 2026-10-25 cold. This is the host/HEAD start-up spread already seen on this host for LTX-2 (section "Cold e2e, definitions A and B"), not the VAE. *Not measured:* an fp32 Qwen-Image cold run on this host.
+
+**Wan2.1 cold A breakdown** (rank-0 probe spans and the app phase seconds, seconds from driver start)
+
+| part | fp32 A on this host (`native_tp4_A_1027`) | **p3** (`native_tp4_p3/cold`) |
+|---|---:|---:|
+| driver start to rank start | 15.06 | 15.66 |
+| rank imports and set-up, to the load | 18.28 | 19.05 |
+| load (`app_load`) | 411.28 | **325.18** |
+| — DiT weights from the store | 217.41 (every rank `hit 7.50 GB`) | 217.07 (every rank `hit 7.50 GB`, 215.9-217.0 s) |
+| — umT5 | 172.56 (fp32 checkpoint) | **85.80** (bf16 store, every rank `hit 2.84 GB`, 85.1-85.8 s) |
+| — warm-up forwards, DiT / umT5 | 13.95 / 4.86 | 14.27 / 5.39 |
+| load end to encode | 0.06 | 6.43 (one in-run neuronx-cc compile, 6.07 s) |
+| encode (cond + uncond) | 1.95 + 0.09 | 2.35 + 0.05 |
+| denoise, 50 steps (step median) | 53.39 (1064.7 ms) | 53.37 (1065.3 ms) |
+| generate ranks exit | 500.03 | 422.06 |
+| VAE launch: load / decode / save (stage) | 11.01 / 7.93 / 0.50 (22.72) | 9.62 (bf16 store `hit 0.15 GB`) / 6.26 / 0.54 (20.09) |
+| **harness wall** | **533.89** | **454.68** |
+
+- **Where the −79.2 s comes from:**
+  - umT5 read: −86.8 s.
+  - VAE launch: −2.6 s.
+  - The in-run compile: +6.4 s.
+- **The in-run compile:** the 2026-10-25 fp32 cell's cold run had the same one (6.43 s). The 2026-10-27 fp32 A run skipped it only because the phase-2 hash check had written that NEFF into the root copy. So against the original fp32 cell (542.74 s), the comparison is like for like.
+- **The plan's projection** (cold about 456 s, umT5 about 86 s) is met: 454.7 s and 85.8 s.
+- **Store:**
+  - The compile wrote the DiT entry (same key `73e38f6c…` as the fp32 root, 27 GB), the umT5 bf16 entry (11 GB, 2.84 GB per rank) and a 0.15 GB bf16 VAE entry (`replicated`). The VAE entry is not in the runbook; the fp32 VAE writes none ("no gain").
+  - The root takes 38 GB, and `/` has 91 GB free.
+
+**Wan2.1 warm.** Bf16 shortens the umT5 load from the page cache (2.31-2.38 → 1.25-1.52 s) and the VAE decode (7.25-7.29 → 5.62-5.85 s). The DiT warm-up forward is about 1.1 s longer (13.2-13.3 → 14.2-14.5 s). The net is within the start-up spread (rank start to `app_load` 13.7-22.4 s), so warm e2e is unchanged (−0.5%). The bf16 umT5 helps when the encoder is read from disk (cold), not from the page cache.
+
+**Compile:**
+- Wan2.1: +37.9 s.
+  - Generate launch +28.5 s: the umT5 load, which now writes its bf16 store entry (88.55 vs 68.53 s), plus a +6.6 s longer warm-up.
+  - Vae launch +8.7 s: the bf16 eager kernels (`vae_load` 170.39 vs 160.98 s).
+- Qwen-Image: +7.2 s, all in the generate launch. The vae launch is level (92.9 vs 93.8 s).
+
+**Peak HBM:**
+- **Wan2.1:**
+  - The DiT cores drop from 15.15 to 11.83 GiB per core, the umT5 shard halving. Rank 0's `max_memory_allocated` goes from 13.48 to 10.67 GiB: −2.81 GiB, the 2.84 GB umT5 difference.
+  - The VAE core drops from 18.40 to at most 11.95 GiB. The VAE rank's `max_memory_allocated` goes from 11.84 to 6.24 GiB.
+  - Native Wan2.1 is now 14% above AoT per core (10.34 GiB), instead of 46.5%.
+- **Qwen-Image:** the VAE core's peak falls below the DiT cores' 10.81 GiB.
+
+### Quality (runbook step 6, and the e2e half of F13)
+
+The metrics ran on the CPU after the device phase (`B/scripts/quality_phase3.sh`, `85701049…`; output `B/phase3/quality/`).
+- **Tools and definitions:** those of parts 1 and 2 (`quality_metrics.py` `8f6e1b18…`, selftest PASS; `frames_map.py` `14ef6365…`). The reference's `out_raw.pt` maps bit-identically to its `out.pt`.
+- **Known pairs recomputed:** the fp32 native q1 rows reproduce parts 1 and 2: Wan 22.663 dB / 0.8854 / latent cosine 0.9668; Qwen-Image 16.105 dB / 0.8234 / 0.8722.
+
+| pair (same noise) | PSNR mean (worst frame) | SSIM mean (worst frame); R / G / B | latent rel-L2 / cosine | file |
+|---|---:|---:|---:|---|
+| **Wan p3 q1 (bf16 umT5 + bf16 VAE) vs `ref_50`** | **22.41 dB** (20.33, frame 0) | **0.880** (0.840, frame 0); 0.875 / 0.887 / 0.879 | 0.258 / **0.966** | `wan_p3_vs_ref.json` |
+| Wan fp32 native q1 vs `ref_50` (part 2) | 22.66 dB (20.32, frame 0) | 0.885 (0.840, frame 0); 0.879 / 0.892 / 0.885 | 0.256 / 0.967 | `known_wan_fp32q1_vs_ref.json` |
+| Wan p3 latents decoded on the host in fp32 vs `ref_50` (umT5 alone) | 22.41 dB (20.33) | 0.880 (0.840) | same latents as p3 | `wan_p3hostfp32_vs_ref.json` |
+| Wan p3 device bf16 VAE frames vs the host fp32 decode of the same latents (VAE alone) | 56.14 dB (55.82) | 0.9993 | | `wan_p3_devvae_vs_hostfp32.json` |
+| Wan p3 q1 vs fp32 native q1, direct | 28.86 dB (25.70, frame 0) | 0.950 (0.926) | 0.148 / 0.989 | `wan_p3_vs_fp32q1.json` |
+| **Qwen-Image p3 q1 (bf16 VAE) vs `ref_native_noise_50`** | **16.11 dB** | **0.823** | 0.522 / 0.872 (identical latents) | `qwen_p3_vs_ref.json` |
+| Qwen-Image p3 q1 vs fp32 native q1, direct | 56.72 dB | 0.9988 | 0 / 1.000 | `qwen_p3_vs_fp32q1.json` |
+
+- **Wan per frame, PSNR** (p3 vs ref): 20.33, 22.03, 22.28, 22.62, 22.71, 22.90, 22.91, 22.95, 23.00. The fp32 native q1 gave 20.32, 22.21, 22.65, 22.96, 23.05, 23.01, 23.15, 23.24, 23.38.
+- **F13, 50-step e2e half: PASS.**
+  - The rule (plan, recorded 2026-10-27) allows at most 0.5 dB PSNR and 0.01 SSIM below the fp32 native q1 against `ref_50`.
+  - Wan p3 is 0.249 dB and 0.0054 SSIM below it, and the latent cosine moves from 0.9668 to 0.9664.
+  - So `--text-encoder-dtype bf16` meets both F13 gates.
+- **Which component costs what:**
+  - All of the Wan drop comes from bf16 umT5. Its latents decoded on the host in fp32 score the same 22.41 dB / 0.880 as the device bf16 decode.
+  - The bf16 VAE is 56 dB from an fp32 decode, which does not move the comparison with the reference (22.414 vs 22.412 dB).
+  - bf16 umT5 changes the trajectory (direct p3 vs fp32: 28.9 dB, latent cosine 0.989) about as far from the fp32 native run as from the reference.
+- **Noise:** Wan p3 q1's `initial.pt` is `03b6284b…`, the shared fp32 noise of both earlier Wan runs.
+- **Frames:** I opened `strip_wan_{native_p3_q1,ref50}_02468.png`.
+  - They show the same red fox trotting right through a snowy forest, in the same pose and place as the reference in frames 2-8.
+  - Frame 0 has the reference's own coloured speckle.
+
+### Decisions on this host (problem, choice, reason)
+
+1. **The runbook's `$PY/torchrun` ran the wrong interpreter.**
+   - **Problem:** the first gate attempt (22:35 UTC, `B/phase3/failed-attempt1-path/`) failed in seconds.
+     - The console scripts of `/home/ubuntu/venvs/native-312` have the shebang `/opt/aws_neuronx_venv_torch_neuronx_2_14_0/bin/python3`, the venv it was copied from. That venv has no diffusers: `ModuleNotFoundError` in both VAE checks.
+     - A systemd unit's PATH has no venv `bin`, so neuronx-cc was not found: `posix_spawn failed` in F13.
+   - **Choice:** launch with `$PY/python -m torch.distributed.run` and `PATH=$PY:$PATH`, exactly as the CLI (`difflet/cli/runner.py`) and `bench4m.py` do. Move attempt 1's 48 KB `p3_scratch` aside, so no failed-compile entry could be reused. Keep the attempt-1 job as `job_phase3_gates.as-used-attempt1-2026-10-27.sh`.
+   - **Reason:** this is a harness and environment problem, not a Difflet bug. The rest of every command is the runbook's.
+2. **`neuron-ls not found in PATH; NUMA optimizations disabled`.**
+   - **Problem:** the unit's PATH has no `/opt/aws/neuron/bin`.
+   - **Choice:** keep it as it was.
+   - **Reason:** the phase-2 and 2026-10-27 unit runs had the same warning (for example `native_tp4_A_1027`, the hash checks). So the p3 cells run under the conditions of the same-host fp32 A run they are compared with. The 2026-10-25 reference cells, started from a login shell, did not have it.
+3. **No same-host fp32 Qwen-Image control.**
+   - **Problem:** the fp32 Qwen-Image native cell is from 2026-10-25 on the old host.
+   - **Choice:** compare against it, and attribute each difference with the per-stage breakdown.
+   - **Reason:** the runbook does not call for a control, and the breakdown separates the VAE (−0.7 s cold, −0.85 s warm decode) from the start-up spread.
+4. **Metrics only after the device phase,** as on 2026-10-27, so that no CPU load overlaps a timed run.
+5. **One added quality row:** a host fp32 decode of the p3 Wan latents (`wan_host_vae_decode.py`, the phase-2 A2 tool), to split umT5's effect from the VAE's. It runs on the CPU in about 1 min.
+6. **The Wan in-run NEFF compile is left in the cold figure.**
+   - **Reason:** the original fp32 cell's cold run, also on a fresh root, had the same compile. This is a fresh-root cell measured as the runbook defines it.
+7. **One run per definition.** No run was anomalous: the outputs are identical across each cell's runs, and every component time is explained above.
+
 ## Next
 
 - **Phase 4 (CPU):** the 7 references, 50 steps each, in fp32, Qwen-Image and LTX-2 first. Inputs:
@@ -1298,6 +1475,7 @@ Tooling only, 2026-10-26 23:50 to 2026-10-27 00:50 UTC. No 50-step reference has
     - AoT frames: use the fp32 host decode `B/wan2_1/aot_main_tp4_twocore/q1_host_vae/host_fp32_frames.pt`, which is the A2 placement, because the device-VAE frames are corrupted.
 - **Phase 5:** PSNR / SSIM fill the last column of the summary table. Part 1 (Qwen-Image and LTX-2) is **done**: section "Quality vs CPU fp32 reference (part 1)". Part 2: Wan2.1 and HunyuanVideo native **done** (section "Quality vs CPU fp32 reference (part 2)"); HunyuanVideo AoT waits for `ref_aot_noise_50` on the next machine.
 - **Phase 6:** definition B, native cold without the weight store, for Wan2.1 and LTX-2: **done** 2026-10-27 on the new host (section "2026-10-27, new host"), together with the LTX-2 AoT two-core 20-step diagnostic. `hunyuan_video/ref_aot_noise_50` started there at 18:12:52 UTC (unit `cpuref_hv_aot`).
+- **Phase 3:** bf16 VAE and umT5 for native Qwen-Image and Wan2.1: **done** 2026-10-27/28 on the new host (section "Phase 3: bf16 VAE and umT5"); every gate passed. Making any of them the default needs the user's approval (the `74fc979` rule: accuracy plus TP2, TP4 and TP2xCP2 runs). Phase 7 (compiled-by-region Wan VAE) can build on the validated bf16 decoder.
 - **Follow-up on main:** the compiled bf16 Wan VAE (`trainium/wan/vae.py`) corrupts frames on the device. Wan2.2 on 2026-10-24 shows the same kind of corruption.
 
 ## Toolchain
