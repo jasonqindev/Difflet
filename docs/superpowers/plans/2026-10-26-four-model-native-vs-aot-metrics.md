@@ -340,7 +340,14 @@ cd $B && /usr/bin/python3 scripts/bench4m.py cell --model wan2_1 --cell native_t
 
 ## Added 2026-10-26 (user): last step, not urgent
 
-- **Phase 7: compiled-by-region VAE for Wan2.1 and Qwen-Image native.** After phase 3, give the Wan VAE decoder (also used by Qwen-Image) the same treatment HunyuanVideo got in F1a (`1c10dfc`): compile the decoder region by region (fixed-size tiles, one set of small graphs) instead of eager per-op execution, in bf16 once phase 3 has validated bf16 for these VAEs. Why: HunyuanVideo's compiled-by-region decoder decodes in 16.0 s vs 74 s eager fp32 and compiles in about 135 s vs 1752 s eager, at the same speed as AoT's whole-graph compile (17.1 s) without AoT's hour-long VAE compile (Wan AoT VAE: 5468 s). Gates: decoded frames >= 50 dB vs the fp32 host decode, CPU tests of the tiling against diffusers, device decode timing; then re-measure Wan2.1 and Qwen-Image native warm/cold e2e as a supplement.
+- **Phase 7: compiled-by-region VAE for Wan2.1 and Qwen-Image native.** After phase 3, give the Wan VAE decoder (also used by Qwen-Image) the same treatment HunyuanVideo got in F1a (`1c10dfc`): compile the decoder region by region (fixed-size tiles, one set of small graphs) instead of eager per-op execution, in bf16 once phase 3 has validated bf16 for these VAEs. Why: HunyuanVideo's compiled-by-region decoder decodes in 16.0 s vs 74 s eager fp32 and compiles in about 135 s vs 1752 s eager, at the same speed as AoT's whole-graph compile (17.1 s) without AoT's hour-long VAE compile (Wan AoT VAE: 5468 s). Gates: decoded frames >= 50 dB vs the fp32 host decode, CPU tests of the tiling against diffusers, device decode timing; then re-measure Wan2.1 and Qwen-Image native warm/cold e2e as a supplement. **Done 2026-10-28** (`796e81b`, `338d73e`, `2cefb43`; opt-in `--vae-exec-mode compile`; `benchmark/trn2/four_model_native_vs_aot_2026-10-26.md`, "Last step: region-compiled Wan/Qwen VAE").
+  - Frame by frame with explicit caches, whole frames (not tiled), 46 / 24 graphs.
+  - Accuracy: bf16 55.91 / 55.87 dB vs the fp32 host decode; fp32 97.5 / 99.3 dB.
+  - VAE compile: 179 → 140 s (Wan), 94 → 62 s (Qwen-Image).
+  - Warm e2e: 129.1 s vs 127.9 s (Wan), 81.2 s vs 78.4 s (Qwen-Image); cold: 464.4 s vs 454.7 s, 517.9 s vs 519.2 s.
+  - Why it loses at these shapes: each fresh vae process re-traces the regions with Dynamo.
+  - Where it wins: from about 45 frames (81 frames: first decode 17.2 vs 21.3 s).
+  - Kept opt-in.
 
 ## Added 2026-10-27 (user): deferred to a new machine
 

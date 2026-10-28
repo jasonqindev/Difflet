@@ -1451,6 +1451,182 @@ The metrics ran on the CPU after the device phase (`B/scripts/quality_phase3.sh`
    - **Reason:** the original fp32 cell's cold run, also on a fresh root, had the same compile. This is a fresh-root cell measured as the runbook defines it.
 7. **One run per definition.** No run was anomalous: the outputs are identical across each cell's runs, and every component time is explained above.
 
+## Last step: region-compiled Wan/Qwen VAE (phase 7, 2026-10-28)
+
+**A supplement, opt-in.** The plan's "Phase 7" ("last step"): the Wan VAE decoder, which Qwen-Image also uses, compiled region by region on the native backend, after HunyuanVideo's compiled decoder (F1a, `1c10dfc`). The switch is **`--vae-exec-mode compile`** (Wan2.1 and Qwen-Image on `--backend neuron`; default `eager`, unchanged). It adds `vae_exec_mode: compile` to the vae stage key, so default stages keep their keys and manifests. **Not the default:** see the recommendation at the end of this section.
+
+**Code** (branch `feat/hunyuan-neuron`):
+- `796e81b` `WanVAERegionDecoder` (`difflet/models/wan/vae/regions.py`, backend-neutral).
+- `338d73e` `NeuronWanVaeDecoderApplication(exec_mode="compile")`.
+- `2cefb43` the CLI switch (Wan and Qwen-Image vae stage; stage key; forwarding to stage processes and DP workers; refused with `--host-vae`).
+
+**Design** (how it differs from HunyuanVideo's):
+- **The walk.** The decode goes one latent frame at a time, as diffusers' untiled `AutoencoderKLWan.decode` does (the host reference). Each causal convolution's two-frame cache is an explicit input and output of its region: the input is `cat(cache, x)`, and the next cache is the last two frames of that input. This reproduces diffusers' `feat_cache` rule in every case, so every latent frame after the first runs the same graphs.
+- **The first latent frame** has its own graphs.
+  - Its causal 3x3x3 convolutions see only zero padding before the frame, so each region convolves with the last temporal tap alone. That is the same sum without the zero terms, on a third of the input.
+  - The temporal upsamplers skip their time convolution (diffusers' `"Rep"`) and seed a zero cache.
+  - A decode of a single latent frame (Qwen-Image) returns no caches.
+- **Graph count.** A decode of any length needs two sets of graphs: 46 NEFFs at Wan's 480x832, 24 at Qwen-Image's 1024x1024.
+- **No spatial tiling** (decision 1 below). The frame is decoded whole, as the reference decodes it, so no tile blending is involved.
+- **Regions follow HunyuanVideo's lessons:**
+  - a resnet is four regions: norm + SiLU, convolution, norm + SiLU, convolution + shortcut + residual;
+  - an upsampler's nearest repeat is one region and its `Conv2d` another;
+  - the zero padding is done inside the convolution op, not with `F.pad`;
+  - no `torch.where`;
+  - caches are made contiguous, because a strided view triggers a recompile.
+- **Precision** is phase 3's bf16 rules: the RMS norms normalise in fp32, the attention scores are fp32, and the output head and clamp run in fp32.
+- **Host and device.** The latents and the decoded chunks stay on the host between region calls. The warm-up decodes at most two latent frames of zeros, which builds every graph.
+
+**Tests (CPU):**
+- New:
+  - `tests/unit/models/wan/test_wan_vae_regions.py`: 12 tests. In fp32 the region decode equals diffusers' `AutoencoderKLWan.decode` and the eager model for 1, 2, 3 and 5 latent frames (atol 2e-5), including three resnets per block on a wide latent. In bf16 it is ≥ 50 dB from the eager bf16 decode. With a counting compile backend, the first two latent frames build every graph and later frames and decodes build none; a one-frame decode builds only cache-free graphs.
+  - `tests/unit/backends/test_neuron_wan_vae_regions_app.py`: 8 tests. The application's compile mode against eager and diffusers' host decode; the warm-up frame count; no graphs after the warm-up.
+  - New CLI tests in `tests/unit/cli/test_orchestrator_{wan,qwen_neuron}.py`. Among them, Qwen-Image's compiled vae stage writes the eager stage's image.
+- **Totals:** `tests/unit/cli/` 836 passed.
+- **The related model and backend suites:** 315 passed and 12 failed. The same 12 fail at `b421f82` (before this work): `neuronx_distributed` is missing from the native venv, and two `configure_compile_cache` HLO-directory tests.
+
+### Device gate: the decoder alone (one core, the phase-3 q1 latents)
+
+**Tool.** `B/scripts/vae_region_check.py`, run by `job_phase7_vae.sh` as `systemd-run --user` units, one at a time.
+- Each model gets a fresh root `B/roots/p7_<tag>`.
+- **`--phase compile`** loads with the warm-up, as the CLI compile stage does. On the fresh root this is the cold compile.
+- **`--phase generate`** is a new process on the same root without the warm-up, as the CLI generate stage runs it. Its first decode loads the graphs.
+- **Latents:** `B/wan2_1/native_tp4_p3/q1/final.pt` and `B/qwen_image/native_tp4_p3/q1/work/latents.pt`.
+- **Reference:** diffusers' fp32 host decode of the same latents (`host_fp32.pt`).
+- **Metrics:** RGB uint8 per frame, `quality_metrics.py`.
+- **Evidence:** `B/phase7/{wan_bf16,qwen_bf16,wan_fp32,qwen_fp32}/`, at `2cefb43` with a clean worktree.
+
+| model, dtype | vs fp32 host decode: PSNR mean (worst) / SSIM (gate ≥ 50 dB) | compile: warm-up decode on a fresh root | NEFFs | decode, steady (repeat in process) | decode, first in a warm process | peak HBM (`max_memory_allocated`) |
+|---|---|---:|---:|---:|---:|---:|
+| **Wan2.1 480x832x9, bf16** | **55.91 dB** (55.35, frame 0) / 0.99934 — **PASS** | 132.3 s | 46 | **1.02 s** | 9.58 s | 6.21 GiB |
+| Wan2.1, fp32 | 97.47 dB (96.61) / 1.00000, max abs < 5e-5 | 203.4 s (*) | 46 | 2.45 s | 9.63 s | 12.38 GiB |
+| **Qwen-Image 1024x1024, bf16** | **55.87 dB** / 0.99856 — **PASS** (56.05 dB / 0.99856 from the phase-3 eager bf16 frames) | 39.9 s | 24 | **0.15 s** | 3.67 s | 2.40 GiB |
+| Qwen-Image, fp32 | 99.31 dB / 1.00000 | 51.6 s | 24 | 0.31 s | 3.64 s | 4.79 GiB |
+| *eager bf16 (phase 3), for comparison:* Wan2.1 | 56.18 dB (other latents: the fp32-umT5 hash check) | vae launch 178.4 s (`vae_load` 170.4) | ~hundreds of per-op | 1.85 s | 5.62-5.85 s (cell warm), 6.26 s (cold A) | 6.24 GiB |
+| *eager bf16 (phase 3):* Qwen-Image | 56.72 dB | vae launch 92.9 s | per-op | 0.41 s | 1.68 s (cell warm) | 5.22 GiB |
+
+(*) The Wan fp32 compile overlapped a CPU unit-test run, so it is not a clean figure. The bf16 rows ran on an idle host.
+
+**What the gate shows:**
+- **Accuracy.** The fp32 compiled decode matches the host to 97.5 / 99.3 dB, the same as the eager fp32 device decode (97.44 / 99.49). So the regions are exact on the device, and bf16 lands where phase 3's eager bf16 landed. Qwen-Image's bf16 is 0.85 dB below eager bf16 against the host; both are 5.9-6.7 dB above the gate.
+- **Steady-state decode:** 1.8x faster for Wan (1.02 vs 1.85 s) and 2.7x faster for Qwen-Image (0.15 vs 0.41 s). Peak HBM falls for Qwen-Image (2.40 vs 5.22 GiB).
+- **The first decode in a fresh process is slower than eager's:** Wan 9.58 vs 5.6-5.9 s, Qwen-Image 3.67 vs 1.68 s. Every process re-traces each region with Dynamo and loads each NEFF.
+  - The diagnostic (`B/phase7/diag/firstcall_wan.json`, `vae_region_firstcall_diag.py`) puts 5.6 s of Wan's first decode in Dynamo: `compile_inner` with bytecode tracing 1.1 s, AOT dispatch 2.2 s, torch-neuronx lowering 1.1 s and guards 0.9 s. The first region call in a process adds 1.3 s of one-time set-up. The rest is NEFF loads and the decode itself.
+  - The CLI starts a fresh vae process for every generate, so it pays this cost on every request.
+
+**Experiment: fewer, larger regions** (`B/phase7/wan_bf16_block/`, an uncommitted `split_resnets=False` option, reverted after the run). Each resnet and the output head as one region gave:
+- 27 NEFFs instead of 46;
+- compile 213.9 s instead of 132.3 s;
+- steady decode 1.10 s instead of 1.02 s;
+- first decode in a warm process 9.05 s instead of 9.58 s;
+- the same 55.91 dB.
+
+The first-decode cost scales with the ops traced, not the number of graphs, so the fine regions stay.
+
+**Failed attempt, kept:** `B/phase7/qwen_bf16_attempt1_edited_during_run/`, with its root `roots/p7_qwen_bf16_attempt1`.
+- **What happened:** I edited `regions.py` (the experiment above) while that run's generate phase was starting. The edit moved line numbers, and the warm process recompiled all 24 NEFFs: first decode 36.5 s.
+- **What it shows:** the native NEFF cache key changes when the source changes, even when the default path is unchanged.
+- **What was re-run:** the run was repeated on a fresh root with the committed file (the table above). The attempt's compile phase (37.6 s, 0.15 s, 55.87 dB) agrees with the re-run.
+
+### Re-measured cells: `--vae-exec-mode compile` on top of the phase-3 flags
+
+**Setup.**
+- **Harness and definitions:** those of phase 3 (`bench4m.py`, definition A cold, gen0 discarded, statistics from gen1-3 with `bench4m_stats.py`, breakdowns from `p3_breakdown.py`).
+- **Cells and roots:** new cells `native_tp4_p7` on fresh roots `B/roots/{qwen_image,wan21}_native_tp4_p7`.
+- **Jobs:** `job_phase7_cells.sh`, then `job_phase7_wan_rest.sh`.
+- **Code and runs:** every run is at `2cefb43`, clean, with `difflet` imported from the worktree, rc 0 and the device released.
+- **Flags:**
+  - Qwen-Image: `--vae-dtype bf16 --vae-exec-mode compile`.
+  - Wan2.1: `--vae-dtype bf16 --text-encoder-dtype bf16 --vae-exec-mode compile`.
+- **Stage keys:** the vae stage key gains `vae_exec_mode: compile`. The DiT keys are the phase-3 roots' keys.
+
+| model | metric | p3 native (eager bf16 VAE) | **p7 native (region-compiled bf16 VAE)** | p7 vs p3 | AoT | p7 vs AoT |
+|---|---|---|---|---:|---|---:|
+| Qwen-Image | VAE compile (the vae launch in `compile`) | 93.8 s (`vae_load` 85.0) | **62.4 s** (`vae_load` 53.7) | **−33.5%** | (AoT compile 1209.9 s in all) | |
+| | compile, total | 194.2 s (99.6 / 93.8) | **157.2 s** (94.0 / 62.4) | **−19.1%** | 1209.9 s | −87.0% |
+| | decode, warm (first in the vae process) | 1.67-1.69 s | 3.71-3.90 s | +2.1 s | | |
+| | vae launch, warm (start to exit) | 19.6-21.6 s (mean 20.67) | 20.7-22.3 s (mean 21.74) | +1.1 s | | |
+| | DiT step median / p10 / p90 | 360.4 / 359.6 / 361.9 ms | 359.8 / 359.1 / 361.7 ms | −0.2% | 360.6 ms | −0.2% |
+| | **warm e2e**, mean of gen1-3 | 78.4 s (77.06, 75.03, 83.08) | **81.2 s** (84.53, 76.56, 82.40; gen0 84.0) | **+3.5%** | 73.7 s | +10.1% |
+| | **cold e2e A** | 519.2 s (vae stage 20.5, decode 1.92) | **517.9 s** (vae stage 27.4, decode 7.85) | −0.3% | 515.6 s | +0.4% |
+| | peak HBM per core (neuron-monitor) | 10.81 GiB on every core | **10.81 GiB on every core**; VAE rank `max_memory_allocated` 5.22 → **2.40 GiB** | 0 | 10.10 GiB | +7.0% |
+| | output | PNG `dc302d76…`, latents `4da4c89e…` | PNG `1a4d131d…`, latents **`4da4c89e…`** (the same in cold, gen0-3 and q1) | latents identical | | |
+| Wan2.1 | VAE compile (the vae launch in `compile`) | 179.3 s (`vae_load` 170.4) | **139.8 s** (`vae_load` 131.4) | **−22.0%** | VAE 5468 s | −97.4% |
+| | compile, total | 638.2 s (458.1 / 179.3) | **593.1 s** (452.6 / 139.8) | **−7.1%** | 5935.7 s | −90.0% |
+| | decode, warm (first in the vae process) | 5.62-5.85 s | 9.08-9.38 s | +3.5 s | | |
+| | vae launch, warm | 24.6-25.6 s (mean 25.00) | 27.4-28.9 s (mean 28.03) | +3.0 s | | |
+| | DiT step median / p10 / p90 | 1064.9 / 1063.7 / 1069.0 ms | 1064.6 / 1063.4 / 1067.5 ms | 0.0% | 956.4 ms | +11.3% |
+| | **warm e2e**, mean of gen1-3 | 127.9 s (131.14, 122.47, 130.19) | **129.1 s** (131.14, 131.87, 124.40; gen0 130.3) | **+1.0%** | 123.16 s (A2) | +4.9% |
+| | **cold e2e A** | 454.7 s (vae stage 25.7, decode 6.26) | **464.4 s** (vae stage 28.4, decode 9.11) | +2.1% | 449.4 s (A2) | +3.3% |
+| | peak HBM per core (neuron-monitor) | 11.83 GiB on every core | **11.83 GiB on every core**; VAE rank 6.24 → 6.21 GiB | 0 | 10.34 GiB | +14.4% |
+| | output | mp4 `2da4edd4…`, latents `fbd0306e…` | mp4 `62823dab…` (the same in cold and gen0-3) | latents: see quality | | |
+
+**Where the differences come from** (per-stage breakdowns):
+- **Compile.** The region-compiled decoder compiles 31 s faster for Qwen-Image and 40 s faster for Wan: 46 and 24 small graphs, against the eager decoder's per-op kernels. The generate launches are level within 6 s.
+- **Warm e2e.** The vae launch is 1.1 s longer for Qwen-Image and 3.0 s longer for Wan. All of it is the first decode in the fresh vae process: Dynamo re-traces each region and each NEFF is loaded (see the gate). The rest of the warm difference is the generate launch's rank start-up spread (rank start to `app_load`: Qwen-Image 18.6 → 21.4 s mean).
+- **Cold.**
+  - The vae stage is 7.0 s longer for Qwen-Image (decode 7.85 s, with the NEFFs read from a dropped page cache) and 2.7 s longer for Wan.
+  - The generate launches move by −8.2 s (Qwen-Image) and +7.1 s (Wan), both from rank start-up (rank start to `app_load`: 42.6 → 36.2 s and 34.7 → 43.3 s).
+  - This is the start-up spread phase 3 already saw on this host, not the VAE. With one run per definition it does not average out.
+- **DiT and HBM** are unchanged. The VAE rank's own peak halves for Qwen-Image. The neuron-monitor peaks per core are the DiT cores' and do not move.
+
+**Quality** (`B/scripts/quality_phase7.sh`, run on the CPU after the device work; output in `B/phase7/quality/`; `quality_metrics.py` selftest PASS):
+- **Latents.** q1's noise, loop output and `work/latents.pt` are bit-identical to the p3 q1 runs for both models (Qwen-Image `4da4c89e…`, Wan `fbd0306e…`). The VAE is the only change.
+- **Qwen-Image:**
+  - p7 q1 vs `ref_native_noise_50`: **16.09 dB / 0.823** (p3: 16.11 / 0.823).
+  - p7 vs p3 q1 directly: 56.05 dB / 0.9986.
+- **Wan2.1:**
+  - p7 q1 vs `ref_50`: **22.41 dB (worst 20.33, frame 0) / 0.880** (p3: 22.41 / 0.880).
+  - p7 vs p3 q1 directly: 56.32 dB (worst 55.93) / 0.9994.
+  - The p7 device decode against the host fp32 decode of the same latents: 55.91 dB / 0.9993 (p3's eager bf16: 56.14 dB).
+- **Frames.** I opened `strip_wan_native_p7_q1_02468.png` and Qwen-Image's `out.png`. Both show the red fox in the snowy forest as before; Wan's frame 0 has the reference's own speckle.
+
+### Supplement: decode time vs clip length (Wan2.1 480x832, bf16, one core)
+
+**What ran.** `job_phase7_long.sh` with `vae_long_clip_timing.py`, random latents of 21 latent frames (81 video frames).
+- Eager on a fresh root, `roots/p7_long_eager`: the first process fills its kernel cache, then two warm processes.
+- The region decoder on `roots/p7_wan_bf16`, built at 9 frames: two processes. The clip length added no NEFF; the root still holds 46.
+- Timing only (`B/phase7/long/`).
+
+| 81 frames (21 latent) | first decode in a warm process | second decode | cold first decode (empty root) | peak HBM |
+|---|---:|---:|---:|---:|
+| eager bf16 | 21.1-21.5 s | 17.45-17.46 s | 172.9 s | 6.57 GiB |
+| **region-compiled bf16** | **17.1-17.3 s** | **9.50-9.54 s** | (132.3 s warm-up at 9 frames, valid for every length) | 6.21 GiB |
+
+**Per process and per frame.**
+- **Set-up:** the region decoder's first decode in a process costs 7.7 s more than its second, against eager's 3.9 s.
+- **Per latent frame:** about 0.47 s, against eager's 0.87 s (from the second decodes at 3 and 21 latent frames).
+- **At Wan's benchmark length** (9 frames, 3 latent frames) the set-up dominates and the region decoder loses 3.5 s per request.
+- **At 81 frames** it wins 4 s on the first decode of a process and 8 s on every decode after it.
+- **Break-even,** by these numbers: near 12 latent frames (about 45 video frames).
+
+### Decisions (problem, choice, reason)
+
+1. **No spatial tiling.**
+   - **Problem:** the plan's wording was "fixed-size tiles". The 50 dB gate's reference is diffusers' untiled decode, and diffusers' own tiled decode blends overlapping tiles, which makes it a different decode. An exact tiling would need halos as deep as the decoder's receptive field.
+   - **Choice:** whole frames. The fixed shapes come from the frame-by-frame walk with explicit caches instead.
+   - **Reason:** it is exact (fp32 matches the host to 97.5 / 99.3 dB), and the regions compiled at full frame within neuronx-cc's limits (46 / 24 graphs, 132 / 40 s).
+2. **Opt-in, not the default.** HunyuanVideo's compiled decoder became its default only after the `74fc979` rule (accuracy plus TP2, TP4 and TP2xCP2 runs) and because it won 58 s per request. Here it loses 1-3.5 s per request at the benchmark shapes. The defaults for Wan and Qwen-Image are not changed (task rule).
+3. **Fine regions kept** over whole-resnet regions, after the experiment above: those compile faster and decode faster, and the larger regions save only 0.5 s of set-up.
+4. **The harness disk guard.**
+   - **Problem:** `bench4m.py` stopped the Wan cell after its compile (rc 0): it wanted 80 GB free before every run, and the compile's 38 GB weight store left 55.8 GB.
+   - **Choice:** ask 80 GB for a compile and 40 GB for the other runs, then run cold, gen0-3 and q1 on the same root with the same flags (`job_phase7_wan_rest.sh`). The earlier version is kept as `bench4m.as-used-p3-and-p7-qwen-wan-compile-2026-10-28.py`.
+   - **Reason:** the other runs write only outputs and logs. No existing root was deleted to make room.
+   - **Afterwards:** `/` has 52 GiB free.
+5. **The in-process decoders** of the composed applications (`enable_vae_decoder=True`, which the CLI does not use) stay eager. Only the CLI vae stage takes the switch.
+6. **One run per definition**, as in phase 3. Every difference is attributed with the stage breakdowns above.
+
+### Recommendation
+
+**Keep `--vae-exec-mode compile` opt-in for Wan2.1 and Qwen-Image; do not make it the default at the benchmark shapes.**
+- It passes every gate: 55.9 dB, the same e2e quality, exact in fp32, and the CPU tests against diffusers.
+- It compiles the VAE 22-34% faster.
+- But the CLI starts a fresh vae process for every request, and its first decode in a process re-traces every region with Dynamo and loads every NEFF. That decode takes 3.7 s for Qwen-Image and 9.1-9.4 s for Wan, against eager's 1.7 s and 5.7 s, which is more than the region decoder saves on 1 image or 3 latent frames. Warm e2e is +1.0% (Wan) and +3.5% (Qwen-Image); cold is within the start-up spread.
+
+It is the better choice for long clips (81 frames: 4 s faster per process; break-even near 45 frames) and for a persistent decoder process: 1.8x / 2.7x faster steady-state decodes, and Qwen-Image's VAE rank at 2.40 instead of 5.22 GiB.
+
+Making it a default anywhere, for example for clips of about 45 frames or more, or for an in-process or serving decoder where the set-up is paid once, needs the user's approval and the `74fc979` runs.
+
 ## Next
 
 - **Phase 4 (CPU):** the 7 references, 50 steps each, in fp32, Qwen-Image and LTX-2 first. Inputs:
@@ -1476,6 +1652,7 @@ The metrics ran on the CPU after the device phase (`B/scripts/quality_phase3.sh`
 - **Phase 5:** PSNR / SSIM fill the last column of the summary table. Part 1 (Qwen-Image and LTX-2) is **done**: section "Quality vs CPU fp32 reference (part 1)". Part 2: Wan2.1 and HunyuanVideo native **done** (section "Quality vs CPU fp32 reference (part 2)"); HunyuanVideo AoT waits for `ref_aot_noise_50` on the next machine.
 - **Phase 6:** definition B, native cold without the weight store, for Wan2.1 and LTX-2: **done** 2026-10-27 on the new host (section "2026-10-27, new host"), together with the LTX-2 AoT two-core 20-step diagnostic. `hunyuan_video/ref_aot_noise_50` started there at 18:12:52 UTC (unit `cpuref_hv_aot`).
 - **Phase 3:** bf16 VAE and umT5 for native Qwen-Image and Wan2.1: **done** 2026-10-27/28 on the new host (section "Phase 3: bf16 VAE and umT5"); every gate passed. Making any of them the default needs the user's approval (the `74fc979` rule: accuracy plus TP2, TP4 and TP2xCP2 runs). Phase 7 (compiled-by-region Wan VAE) can build on the validated bf16 decoder.
+- **Phase 7 (last step):** the region-compiled Wan/Qwen-Image VAE: **done** 2026-10-28 (section "Last step: region-compiled Wan/Qwen VAE"). It ships as the opt-in `--vae-exec-mode compile`: 55.9 dB, VAE compile −22% (Wan) and −34% (Qwen-Image), warm e2e +1.0% / +3.5% at the benchmark shapes, faster from about 45 frames. It is not the default, which would need the user's approval.
 - **Follow-up on main:** the compiled bf16 Wan VAE (`trainium/wan/vae.py`) corrupts frames on the device. Wan2.2 on 2026-10-24 shows the same kind of corruption.
 
 ## Toolchain
