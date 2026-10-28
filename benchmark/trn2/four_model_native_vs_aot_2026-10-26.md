@@ -1627,6 +1627,41 @@ It is the better choice for long clips (81 frames: 4 s faster per process; break
 
 Making it a default anywhere, for example for clips of about 45 frames or more, or for an in-process or serving decoder where the set-up is paid once, needs the user's approval and the `74fc979` runs.
 
+## CPU bf16 baseline (started 2026-10-28)
+
+**Question:** how much of the device-vs-CPU-fp32 gap does bf16 alone cause? Each CPU fp32 reference is re-run on the CPU in bf16, from the same injected dumps, and compared with its fp32 counterpart. If a device output is about as close to fp32 as CPU bf16 is, the device adds no error of its own. The first pair, the LTX-2 AoT-noise 50-step run, is the open question: video latent cosine 0.725 at 50 steps against 0.991 at 20.
+
+**What runs in bf16:** the `cpu_ref_*.py` scripts have a new `--dtype` / `--vae-dtype` option. It defaults to float32, and with the defaults the scripts run the fp32 code path.
+- The DiT and the text encoders run in bf16: Qwen2.5-VL, Gemma-3, umT5, and Llama-3 + CLIP-L. So do LTX-2's text connectors. They load through diffusers' own `torch_dtype=bfloat16`, which keeps Wan's `_keep_in_fp32_modules` in fp32.
+- The VAEs stay fp32, and so do LTX-2's audio VAE and vocoder.
+- **Why the VAE stays fp32:** the question is the denoising trajectory. The latent metrics do not depend on the VAE, and with an fp32 decode the frame PSNR reflects only the trajectory. The bf16 VAE was gated on its own in phase 3.
+- **Unchanged from fp32:** the dumps (checked against the fp32 `reference.json` before each run), prompt, steps, schedule, guidance, negative prompt and diffusers' pipeline call.
+- **Loop latents:** diffusers sets the dtype of the latents in the loop, and each `reference.json` records it.
+  - Qwen-Image keeps them in bf16 (the prompt-embeds dtype), and its timestep reaches the DiT in bf16.
+  - LTX-2 and Wan2.1 keep them in fp32 and cast the DiT input to bf16. LTX-2 also rounds the final latents to bf16 before its fp32 VAE.
+  - HunyuanVideo starts in fp32. FlowMatchEuler casts back to the DiT output dtype, so its latents are bf16 from step 2 on. Its guidance input is bf16(6.0) x 1000 = 6016, the value both device orchestrators feed; the fp32 reference fed 6000.
+
+**Smoke tests** (2 DiT blocks, 2 steps, CPU only, the Neuron modules blocked, all rc 0):
+- **Injection:** the loop starts from the dump bit for bit in all five smokes: Qwen native, LTX-2 AoT, Wan2.1, HunyuanVideo native and HunyuanVideo AoT. The first DiT input equals the dump cast to bf16: lossless for the bf16 dumps, and the bf16 rounding for the fp32 dumps of Wan2.1 and HunyuanVideo native.
+- **fp32 path unchanged:** fp32 re-runs of the edited Qwen-Image and Wan2.1 scripts reproduce the 2026-10-26 smokes bit for bit (`final.pt`, `out.pt`, PNG / `out_raw.pt`).
+- **Dry run of the metrics script** on the smoke pairs, as a tool check only (2 blocks, 2 steps): bf16 vs fp32 cosine 1.0000 / 1.0000 / 0.9992 / 0.9986 for Qwen-Image / LTX-2 / Wan2.1 / HunyuanVideo AoT.
+
+**Queue:** the systemd user unit `cpuref_bf16_queue` (`B/scripts/job_cpu_ref_queue_bf16.sh`) started at 03:03 UTC, one run at a time. Order:
+1. LTX-2 AoT noise, 50 steps
+2. LTX-2 AoT noise, 20 steps (`xcheck_aot_noise_20_bf16`)
+3. LTX-2 native noise, 50 steps
+4. Qwen-Image AoT noise
+5. Qwen-Image native noise
+6. Wan2.1
+7. HunyuanVideo native noise
+8. HunyuanVideo AoT noise
+
+- **First run:** the injection check passed after step 1. Step 1 took 273.6 s, most of it reading the DiT weights lazily from disk; step 2 took 21.5 s, against 80 s in fp32.
+- **Expected finish:** about 6-7.5 h in all, so roughly 09:00-10:30 UTC. The plan's 24 h assumed bf16 would be slower than fp32 on this CPU; it is about 3.7x faster here.
+- **Outputs:** `B/<model>/cpu_ref/<name>_bf16/`.
+- **Metrics:** after each run, `B/scripts/metrics_bf16_vs_fp32.py` writes `B/cpu_bf16_baseline/metrics/`: the pair check, `quality_metrics.py` (CPU fp32 = ref, CPU bf16 = candidate) and `summary.md`, which sets each pair beside the device-vs-fp32 numbers for the same noise.
+- **Results:** none yet.
+
 ## Next
 
 - **Phase 4 (CPU):** the 7 references, 50 steps each, in fp32, Qwen-Image and LTX-2 first. Inputs:
